@@ -1,0 +1,6 @@
+/brioctl
+/brioctl.dSYM
+/brioctl-*.tar.gz
+/tests/brioctl-fake
+/tools/hidmon
+/tools/uvcwatch
