@@ -23,14 +23,85 @@ Not affiliated with or endorsed by Logitech. See [Disclaimer](#disclaimer).
 - Presets, including `colorboost`, and named settings files: `save` and `apply`.
 - `import optionsplus` turns the settings Logi Options+ saved for the camera into a settings file, without a camera.
 - `watch`, a LaunchAgent that re-applies your settings when the camera is connected and when video starts.
+- A [menu bar app](#menu-bar-app) with the same controls, global hotkeys and a `brioctl://` URL scheme for Shortcuts.
 - `--json` output and `get NAME` for scripts.
 - `snapshot` for bug reports, `defaults` to go back to the camera's default values, and `factory-reset` to restart the
   camera with factory settings and then restore yours.
 - A read-only `dump` of every unit and extension control the camera has.
 
+## Menu bar app
+
+`brioctl.app` puts the controls in the menu bar. Click the camera icon and a small window shows the settings of the
+chosen camera, grouped as in `brioctl show` (Logitech, Framing, Exposure and image, Found in the firmware). Each one
+has the control its kind and range call for: a switch, a segmented control, a menu or a slider. A line under the camera
+name says whether video is on and whether the camera shows the desk. With several cameras a menu at the top picks one.
+The Presets menu applies a preset or a saved file, and "Save current as..." stores the camera's settings under a name.
+
+The app contains the command-line tool (`brioctl.app/Contents/Resources/brioctl`) and does everything through it: it
+reads `--json` and changes settings with the commands you would type. It never opens the camera itself, so it needs no
+camera permission. It needs macOS 13 or later, on Apple Silicon or Intel, and has no Dock icon.
+
+Install it with Homebrew:
+
+```sh
+brew install --cask petrochen/tap/brioctl-app
+```
+
+Or download `brioctl-app-1.1.0.zip` from the GitHub releases page, unzip it and move `brioctl.app` to `/Applications`.
+The app is ad-hoc signed and not notarized, so macOS refuses the first launch of a copy that a browser downloaded. Open
+System Settings, Privacy & Security, and choose "Open Anyway" for brioctl, or remove the quarantine attribute before
+you start it:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/brioctl.app
+```
+
+The Homebrew cask removes the attribute for you. To build the app yourself, run `make app` (it needs Swift, which comes
+with Xcode and the Command Line Tools) and open `app/build/brioctl.app`. See [app/README.md](app/README.md).
+
+The gear icon opens the app's settings:
+
+- **Re-apply settings automatically** saves the current settings and installs the LaunchAgent
+  `com.github.petrochen.brioctl`, which runs `brioctl watch` with the tool inside the app (see
+  [Apply settings automatically](#apply-settings-automatically)). An agent that `make agent` or Homebrew
+  (`homebrew.mxcl.brioctl`) installed is left alone, and the app works with it.
+- **Launch at login** writes `~/Library/LaunchAgents/com.github.petrochen.brioctl.app.plist`, which opens the app when
+  you log in. It works from the packaged `brioctl.app` only.
+- **Global hotkeys** are off until you switch them on. They need no Accessibility permission, act on the chosen camera
+  and do nothing when the camera lacks the control. If another app already uses a key, the settings page says so.
+
+  | Keys | Action     |
+  | ---- | ---------- |
+  | ⌃⌥⌘1 | `fov 90`   |
+  | ⌃⌥⌘2 | `fov 78`   |
+  | ⌃⌥⌘3 | `fov 65`   |
+  | ⌃⌥⌘0 | `zoom 100` |
+  | ⌃⌥⌘= | `zoom` +25 |
+  | ⌃⌥⌘- | `zoom` −25 |
+
+**Changes made in the app are saved for auto-apply.** `brioctl watch` puts `~/.config/brioctl/settings` back when the
+camera connects and when video starts, which would undo a change made in the app. So while an agent with the label
+`com.github.petrochen.brioctl` or `homebrew.mxcl.brioctl` is installed, whoever installed it, the app runs
+`brioctl [--camera ID] save` about a second after its last change: a slider, a menu, a preset, a hotkey or a URL. A
+burst of slider moves gives one save, and the window shows "Saved for auto-apply" when it is done. If the agent follows
+another camera than the chosen one, the app leaves the file alone. With no agent installed the app saves nothing on its
+own; "Remember current settings" in the settings writes the file once.
+
+**URL scheme.** The app handles `brioctl://` URLs, for the Open URLs action in Shortcuts and for scripts. They start the
+app when it is not running:
+
+```sh
+open "brioctl://set?fov=78&zoom=115"    # change settings of the chosen camera
+open "brioctl://apply?name=warmer"      # apply a preset or a saved file
+open "brioctl://camera?id=2"            # choose the camera: an index, a serial number or a location
+```
+
+A URL can only change settings, apply a preset or a saved file, and choose the camera. Names the camera does not have
+are ignored, and so are values that are not plain words or numbers.
+
 ## Requirements
 
-- macOS 12 or later, on Apple Silicon or Intel.
+- macOS 12 or later, on Apple Silicon or Intel. The menu bar app needs macOS 13.
 - A UVC camera. Full support is for the Logitech MX Brio (`046d:0944`), tested with firmware 1.1.394. See
   [Cameras](#cameras) for the others.
 - To build from source: Xcode or the Command Line Tools (`xcode-select --install`).
@@ -46,8 +117,8 @@ brew install petrochen/tap/brioctl
 From the release tarball (a universal binary for Apple Silicon and Intel), from the GitHub releases page:
 
 ```sh
-tar xzf brioctl-1.0.0-macos-universal.tar.gz
-cd brioctl-1.0.0-macos-universal
+tar xzf brioctl-1.1.0-macos-universal.tar.gz
+cd brioctl-1.1.0-macos-universal
 xattr -d com.apple.quarantine brioctl   # only needed if a browser downloaded the tarball
 install -m 755 brioctl ~/bin/brioctl
 ```
@@ -69,7 +140,9 @@ make && sudo make install PREFIX=/usr/local   # installs /usr/local/bin/brioctl
 ```
 
 `make universal` builds a binary for both Apple Silicon and Intel (macOS 12 or later), and `make dist` packs it with
-the README and the license into `brioctl-VERSION-macos-universal.tar.gz`.
+the README and the license into `brioctl-VERSION-macos-universal.tar.gz`. `make app` builds the
+[menu bar app](#menu-bar-app) (`app/build/brioctl.app`) and `make app-zip` packs it into
+`app/build/brioctl-app-VERSION.zip`; neither is part of `make`.
 
 ## Usage
 
@@ -358,7 +431,8 @@ make agent          # install brioctl to PREFIX/bin and start "brioctl watch" at
 make unagent        # remove it again
 ```
 
-With Homebrew, `brew services start brioctl` does the same.
+With Homebrew, `brew services start brioctl` does the same. The [menu bar app](#menu-bar-app) can install the agent
+too, and keeps the settings file up to date when you change something in it.
 
 `make agent` installs a LaunchAgent with the label `com.github.petrochen.brioctl` in `~/Library/LaunchAgents`. If
 `~/.config/brioctl/settings` does not exist yet, it saves the current settings first. The log is
@@ -455,7 +529,8 @@ inferred.
 ## Testing
 
 ```sh
-make test
+make test       # the command-line tool
+make test-app   # the menu bar app: unit tests of its Swift package (app/README.md)
 ```
 
 The tests run without a camera. The same `brioctl.c` is built with `-DBRIOCTL_FAKE`, and a camera emulator answers its
