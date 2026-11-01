@@ -147,6 +147,13 @@ public struct RootView: View {
                 if let notice = store.notice {
                     Label(notice, systemImage: "checkmark.circle.fill").font(.caption).foregroundStyle(.green)
                 }
+                switch store.autoSaveStatus {
+                case .idle: EmptyView()
+                case .pending:
+                    Label("Saving for auto-apply\u{2026}", systemImage: "clock").font(.caption).foregroundStyle(.secondary)
+                case .saved:
+                    Label("Saved for auto-apply", systemImage: "checkmark.circle").font(.caption).foregroundStyle(.secondary)
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         } else if store.isLoading {

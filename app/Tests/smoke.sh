@@ -112,6 +112,31 @@ expect "nothing changed" 1 mic on
 echo "--- no LaunchAgent was written"
 if [ -z "$(ls -A "$TMP/agents")" ]; then echo "ok:   the agents directory is empty"; else fail "files in the agents directory: $(ls "$TMP/agents")"; fi
 
+echo "--- no agent: nothing saved behind the user's back"
+SETTINGS=$TMP/home/.config/brioctl/settings
+if [ ! -e "$SETTINGS" ]; then echo "ok:   no settings file after all those changes"; else fail "$SETTINGS was written without an agent"; fi
+
+echo "--- an installed agent: changes are saved for it"
+# A Homebrew-style agent (the app only reads the plist: AGENTS_DIR keeps launchd out of it). The app looks again at every change.
+cat > "$TMP/agents/homebrew.mxcl.brioctl.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+<key>Label</key><string>homebrew.mxcl.brioctl</string>
+<key>ProgramArguments</key><array><string>/opt/homebrew/opt/brioctl/bin/brioctl</string><string>watch</string></array>
+</dict></plist>
+PLIST
+# Camera 2 (a standard camera) is still the chosen one, and an agent without --camera never follows such a camera.
+launch "brioctl://set?zoom=140"
+wait_for "set on camera 2" 2 zoom 140
+sleep 2.5  # the save would come a second after the change
+if [ ! -e "$SETTINGS" ]; then echo "ok:   the agent does not follow camera 2, its file is left alone"; else fail "settings written for camera 2"; fi
+launch "brioctl://camera?id=1"
+sleep 1
+launch "brioctl://set?zoom=150"
+n=0
+while [ $n -lt 100 ] && ! grep -qx "zoom 150" "$SETTINGS" 2>/dev/null; do sleep 0.2; n=$((n + 1)); done
+if grep -qx "zoom 150" "$SETTINGS" 2>/dev/null; then echo "ok:   saved for the agent (zoom 150 in settings)"; else fail "zoom 150 did not reach $SETTINGS"; fi
+
 echo "--- quit"
 kill "$PID"
 n=0

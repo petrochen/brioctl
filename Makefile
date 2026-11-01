@@ -1,6 +1,6 @@
 CFLAGS ?= -Wall -Wextra -Wno-missing-field-initializers -O2
 # Plain assignment: make VERSION=x overrides it, the environment does not.
-VERSION = 1.0.0
+VERSION = 1.1.0
 PREFIX ?= $(HOME)
 LABEL = com.github.petrochen.brioctl
 AGENT = $(HOME)/Library/LaunchAgents/$(LABEL).plist
@@ -30,6 +30,19 @@ test:
 	rm -f tests/brioctl-fake
 	$(MAKE) tests/brioctl-fake
 	VERSION=$(VERSION) sh tests/run.sh
+
+# The menu bar app (app/): build/brioctl.app, universal, ad-hoc signed, with this CLI inside. Not part of `make` or
+# `make test`; it needs Swift. See app/README.md.
+app:
+	$(MAKE) -C app VERSION=$(VERSION)
+
+# app/build/brioctl-app-$(VERSION).zip, the file of the release and of the Homebrew cask.
+app-zip:
+	$(MAKE) -C app zip VERSION=$(VERSION)
+
+# Unit tests of the app (they build tests/brioctl-fake first and never touch a real camera).
+test-app:
+	$(MAKE) -C app test
 
 # Always rebuilt: it replaces ./brioctl with the universal binary.
 universal:
@@ -62,6 +75,7 @@ unagent:
 
 clean:
 	$(MAKE) -C tools clean
+	$(MAKE) -C app clean
 	rm -rf brioctl tests/brioctl-fake tests/brioctl-fake.dSYM brioctl.dSYM brioctl-*-macos-universal brioctl-*.tar.gz
 
-.PHONY: universal dist install agent unagent clean test fixtures
+.PHONY: universal dist install agent unagent clean test fixtures app app-zip test-app

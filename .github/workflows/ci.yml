@@ -25,6 +25,22 @@ jobs:
           lipo -info brioctl
           lipo -info brioctl | grep -q arm64
           lipo -info brioctl | grep -q x86_64
+      # The menu bar app (app/): Swift package, tools version 5.9 (Swift 5 language mode, macOS 13 target), so whatever
+      # Xcode the runner has builds it. The version is only printed to help when it does not.
+      - name: Swift version
+        run: swift --version
+      - name: Test the app
+        run: make test-app
+      - name: Build the app
+        run: make app
+      - name: Check the app bundle
+        run: |
+          codesign --verify --deep --strict app/build/brioctl.app
+          for exe in app/build/brioctl.app/Contents/MacOS/brioctl-app app/build/brioctl.app/Contents/Resources/brioctl; do
+            lipo -info "$exe"
+            lipo -info "$exe" | grep -q arm64
+            lipo -info "$exe" | grep -q x86_64
+          done
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -39,6 +55,17 @@ jobs:
           version="${GITHUB_REF_NAME#v}"
           make dist VERSION="$version"
           tar -tzf "brioctl-$version-macos-universal.tar.gz"
+      - name: Build the app zip
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          make app-zip VERSION="$version"
+          zip="app/build/brioctl-app-$version.zip"
+          # The zip as a user gets it: unpacked, still signed, with a CLI of this version inside.
+          check="$(mktemp -d)"
+          ditto -x -k "$zip" "$check"
+          codesign --verify --deep --strict "$check/brioctl.app"
+          "$check/brioctl.app/Contents/Resources/brioctl" --version | grep -qx "brioctl $version"
+          ls -l "$zip"
       - name: Create the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -48,8 +75,8 @@ jobs:
           awk -v v="$version" '/^## /{ p = (index($0, "## " v " ") == 1); next } p' CHANGELOG.md > notes.md
           if [ -s notes.md ]; then
             gh release create "$GITHUB_REF_NAME" "brioctl-$version-macos-universal.tar.gz" \
-              --title "brioctl $version" --notes-file notes.md
+              "app/build/brioctl-app-$version.zip" --title "brioctl $version" --notes-file notes.md
           else
             gh release create "$GITHUB_REF_NAME" "brioctl-$version-macos-universal.tar.gz" \
-              --title "brioctl $version" --generate-notes
+              "app/build/brioctl-app-$version.zip" --title "brioctl $version" --generate-notes
           fi

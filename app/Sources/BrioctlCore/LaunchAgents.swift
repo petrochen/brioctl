@@ -62,6 +62,16 @@ public struct SystemLaunchctl: LaunchctlRunning {
     public func isLoaded(label: String) -> Bool { launchctl(["print", "\(domain)/\(label)"]).status == 0 }
 }
 
+/// Stands in for launchd when the agents directory is redirected (development, smoke test): the plists are written and
+/// read as usual, but nothing is loaded or unloaded. The label of the real agent is the same, so the real launchd must
+/// not be asked.
+public struct InertLaunchctl: LaunchctlRunning {
+    public init() {}
+    public func bootstrap(plist: URL) throws {}
+    public func bootout(label: String) {}
+    public func isLoaded(label: String) -> Bool { false }
+}
+
 public enum WatchAgentState: Equatable {
     /// Nothing installed.
     case off
@@ -75,6 +85,30 @@ public enum WatchAgentState: Equatable {
         case makeAgent(program: String)
         case homebrew
         case unreadable
+    }
+}
+
+/// The `brioctl watch` agent that is installed, whoever installed it (this app, `make agent`, `brew services`): what
+/// the app needs to know to keep the file `settings` in step with the camera.
+public struct AutoApplyAgent: Equatable {
+    public var installed: Bool
+    /// The `--camera` the agent was started with; nil = it picks the camera itself.
+    public var camera: String?
+
+    public static let none = AutoApplyAgent(installed: false, camera: nil)
+
+    public init(installed: Bool, camera: String?) {
+        self.installed = installed
+        self.camera = camera
+    }
+
+    /// Does saving the settings of this camera feed the agent? An agent started with `--camera` follows that camera.
+    /// One started without it follows a camera brioctl knows and never a standard one (it waits for the MX Brio
+    /// instead), so saving a standard camera over its file would only break it.
+    public func follows(_ camera: CameraInfo?) -> Bool {
+        guard installed, let camera else { return false }
+        if let id = self.camera { return camera.matches(id: id) }
+        return camera.support != "standard"
     }
 }
 
@@ -158,6 +192,27 @@ public final class LaunchAgentManager {
 
     /// Is the agent loaded in launchd right now?
     public func watchIsRunning() -> Bool { launchctl.isLoaded(label: AgentLabel.watch) }
+
+    /// The agent whose settings file the app keeps up to date: the watch plist of this app or of `make agent`, else
+    /// the one of Homebrew. An unreadable plist still counts as an installed agent.
+    public func autoApplyAgent() -> AutoApplyAgent {
+        for label in [AgentLabel.watch, AgentLabel.homebrew] {
+            let url = plistURL(label)
+            guard fm.fileExists(atPath: url.path) else { continue }
+            let args = Self.read(url).flatMap { $0["ProgramArguments"] as? [String] } ?? []
+            return AutoApplyAgent(installed: true, camera: Self.cameraArgument(in: args))
+        }
+        return .none
+    }
+
+    /// `--camera ID` or `--camera=ID` in the arguments of an agent.
+    static func cameraArgument(in args: [String]) -> String? {
+        for (i, arg) in args.enumerated() {
+            if arg == "--camera", i + 1 < args.count { return args[i + 1] }
+            if arg.hasPrefix("--camera=") { return String(arg.dropFirst("--camera=".count)) }
+        }
+        return nil
+    }
 
     /// Writes the plist and loads it. Replaces an agent this app installed earlier; refuses to touch any other.
     public func installWatch(camera: String?) throws {
