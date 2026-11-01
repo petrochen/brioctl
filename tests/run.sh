@@ -499,8 +499,8 @@ t_list() {
     want='{"cameras":[{"index":1,"vid":"1234","pid":"5678","name":"Generic UVC","model":null,"support":"standard",'
     want="$want"'"serial":"GENERIC0001","location":"0x100000"},{"index":2,"vid":"046d","pid":"0944","name":"MX Brio",'
     want="$want"'"model":"MX Brio","support":"full","serial":"BRIOSERIAL1","location":"0x200000"},{"index":3,'
-    want="$want"'"vid":"1234","pid":"5678","name":"Generic UVC","model":null,"support":"standard","serial":"GENERIC0002",'
-    want="$want"'"location":"0x300000"}]}'
+    want="$want"'"vid":"1234","pid":"5678","name":"Generic UVC","model":null,"support":"standard",'
+    want="$want"'"serial":"GENERIC0002","location":"0x300000"}]}'
     expect "json" "$("$BIN" list --json)" "$want" || return 1
     BRIOCTL_FAKE=$PWD/brio500.snap
     has "experimental" "$("$BIN" list)" "046d:0943  Brio 500" || return 1
@@ -586,7 +586,8 @@ t_snapshot_device_lines() {
     has "device" "$(cat out.snap)" "device 046d 0944" || return 1
     has "name" "$(cat out.snap)" "name MX Brio" || return 1
     has "serial is masked" "$(cat out.snap)" "serial 000000000000" || return 1
-    sed 's/^serial .*/serial REALSERIAL1/;s/^name .*/name Some Camera Name/;s/^device .*/device 1234 abcd/' camera.snap > other.snap
+    sed 's/^serial .*/serial REALSERIAL1/;s/^name .*/name Some Camera Name/;s/^device .*/device 1234 abcd/' \
+        camera.snap > other.snap
     out=$(BRIOCTL_FAKE=$PWD/other.snap "$BIN" snapshot) || return 1
     has "other device" "$out" "device 1234 abcd" || return 1
     has "name with spaces" "$out" "name Some Camera Name" || return 1
@@ -681,8 +682,8 @@ t_experimental_camera() {
     out=$("$BIN" 2>&1); rc=$?
     expect "status" "$rc" 0 || return 1
     has "name" "$out" "Brio 500  046d:0943" || return 1
-    has "the one-line notice" "$out" \
-        "experimental support: reported by other projects, not tested with brioctl; please report with 'brioctl snapshot'" || return 1
+    has "the one-line notice" "$out" "experimental support: reported by other projects, not tested with brioctl; \
+please report with 'brioctl snapshot'" || return 1
     expect "the notice is one line" "$(printf '%s\n' "$out" | grep -c 'experimental support')" 1 || return 1
     for name in fov showmode hdr zoom brightness; do
         matches "$name line" "$out" "^  $name +[^ ]+ +default " || return 1
@@ -747,7 +748,8 @@ t_logitech_models() {
         out=$(BRIOCTL_FAKE=$PWD/model.snap "$BIN" 2>&1) || return 1
         has "$dev is standard" "$out" "standard UVC controls only" || return 1
         noline "$dev has no fov" "$out" fov || return 1
-        out=$(BRIOCTL_FAKE=$PWD/model.snap BRIOCTL_FAKE_TRACE=1 "$BIN" fov 65 showmode off warmth 60 mic off zoom 120 2>&1)
+        out=$(BRIOCTL_FAKE=$PWD/model.snap BRIOCTL_FAKE_TRACE=1 "$BIN" \
+            fov 65 showmode off warmth 60 mic off zoom 120 2>&1)
         expect "$dev: only the standard control is written" \
             "$(printf '%s\n' "$out" | grep -o 'SET_CUR unit [0-9]* sel [0-9]*')" "SET_CUR unit $CT sel 11" || return 1
         has "$dev is listed as standard" "$(BRIOCTL_FAKE=$PWD/model.snap "$BIN" list)" standard || return 1
@@ -778,7 +780,8 @@ t_dump_unknown_extension_unit() {
     sed 's/1502e44934f4fe47b1580e885023e51b/1502e44934f4fe47b1580e885023e51c/' camera.snap > other-guid.snap
     cmp -s camera.snap other-guid.snap && { echo "# GUID not found in the descriptor"; return 1; }
     BRIOCTL_FAKE=$PWD/other-guid.snap BRIOCTL_FAKE_TRACE=2 "$BIN" dump > out 2> trace || return 1
-    has "unit is listed" "$(cat out)" "extension unit $VIDEOPIPE  49e40215-f434-47fe-b158-0e885023e51c  unknown" || return 1
+    has "unit is listed" "$(cat out)" \
+        "extension unit $VIDEOPIPE  49e40215-f434-47fe-b158-0e885023e51c  unknown" || return 1
     expect "no value request to it" "$(grep -cE "^fake GET_(CUR|MIN|MAX|RES|DEF) unit $VIDEOPIPE " trace)" 0 || return 1
     has "but asked what it is" "$(cat trace)" "fake GET_INFO unit $VIDEOPIPE sel 5"
 }
@@ -894,11 +897,11 @@ t_other_snapshots_round_trip() {
     "$BIN" snapshot > out.snap || return 1
     grep -v '^#' generic.snap | sort > want
     grep -v '^#' out.snap | sort > got
-    cmp -s want got || { echo "# snapshot of the generic camera differs from the fixture"; diff want got | head -5; return 1; }
+    cmp -s want got || { echo "# snapshot of the generic camera differs"; diff want got | head -5; return 1; }
     BRIOCTL_FAKE=$PWD/extra.snap "$BIN" snapshot > out.snap || return 1
     grep -v '^#' extra.snap | sort > want
     grep -v '^#' out.snap | sort > got
-    cmp -s want got || { echo "# snapshot of the extra camera differs from the fixture"; diff want got | head -5; return 1; }
+    cmp -s want got || { echo "# snapshot of the extra camera differs"; diff want got | head -5; return 1; }
     BRIOCTL_FAKE=$PWD/brio500.snap "$BIN" snapshot > out.snap || return 1
     has "device line" "$(cat out.snap)" "device 046d 0943" || return 1
     has "header" "$(head -1 out.snap)" "firmware 1.1.394"
@@ -909,7 +912,7 @@ t_fixtures_are_generated() {
     mkdir fx && cp "$HERE/make-fixtures.py" "$HERE/mxbrio-1.1.394.snap" fx/ || return 1
     python3 -I fx/make-fixtures.py > /dev/null || return 1
     for f in generic-uvc generic-uvc-extra brio500-sim; do
-        cmp -s "fx/$f.snap" "$HERE/$f.snap" || { echo "# $f.snap is not what make-fixtures.py writes (make fixtures)"; return 1; }
+        cmp -s "fx/$f.snap" "$HERE/$f.snap" || { echo "# $f.snap is not what make-fixtures.py writes"; return 1; }
     done
     # the generic camera really has no extension unit and a consistent descriptor
     python3 -I - generic.snap <<'EOF'
@@ -952,7 +955,8 @@ for name, v in s.items():
     assert all((k in v) == (v["kind"] == "number") for k in ("min", "max", "step")), (name, v)
 # a number: the camera's range and step, scaled like the value
 z = s["zoom"]
-assert (z["kind"], z["min"], z["max"], z["step"], z["group"], z["writable"]) == ("number", 100, 400, 1, "Framing", True), z
+assert (z["kind"], z["min"], z["max"], z["step"]) == ("number", 100, 400, 1), z
+assert (z["group"], z["writable"]) == ("Framing", True), z
 assert (s["pan"]["min"], s["pan"]["max"], s["pan"]["step"]) == (-20, 20, 1), s["pan"]
 assert (s["exposure"]["min"], s["exposure"]["max"]) == (3, 2047), s["exposure"]
 assert (s["warmth"]["min"], s["warmth"]["max"], s["warmth"]["group"]) == (0, 100, "Logitech"), s["warmth"]
@@ -993,7 +997,8 @@ assert s["backlight"]["kind"] == "number" and (s["backlight"]["min"], s["backlig
 dev = b["device"]
 assert (dev["vid"], dev["pid"], dev["model"], dev["support"]) == ("046d", "0943", "Brio 500", "experimental"), dev
 s = b["settings"]
-assert {"fov", "showmode", "hdr"} <= set(s) and not {"tint", "warmth", "vibrance", "expcomp", "mic", "smooth", "backlight"} & set(s)
+assert {"fov", "showmode", "hdr"} <= set(s)
+assert not {"tint", "warmth", "vibrance", "expcomp", "mic", "smooth", "backlight"} & set(s), sorted(s)
 assert b["micgain"] is None
 s = x["settings"]
 assert (s["roll"]["min"], s["roll"]["max"]) == (-180, 180), s["roll"]
@@ -1024,8 +1029,10 @@ t_profiles_json() {
     want='{"presets":[{"name":"neutral","settings":{"warmth":"50","saturation":"128"}},'
     want="$want"'{"name":"warmer","settings":{"warmth":"60"}},{"name":"cooler","settings":{"warmth":"40"}},'
     want="$want"'{"name":"bw","settings":{"saturation":"0"}},{"name":"standard","settings":{"priority":"exposure"}},'
-    want="$want"'{"name":"streaming","settings":{"priority":"fps"}},{"name":"colorboost","settings":{"saturation":"255"}}],'
-    expect "no saved files" "$("$BIN" profiles --json)" "$want\"saved\":[],\"dir\":\"$HOME/.config/brioctl\"}" || return 1
+    want="$want"'{"name":"streaming","settings":{"priority":"fps"}},'
+    want="$want"'{"name":"colorboost","settings":{"saturation":"255"}}],'
+    expect "no saved files" "$("$BIN" profiles --json)" \
+        "$want\"saved\":[],\"dir\":\"$HOME/.config/brioctl\"}" || return 1
     "$BIN" save > /dev/null || return 1
     "$BIN" save meeting > /dev/null || return 1
     expect "saved files, sorted" "$("$BIN" profiles --json)" \
@@ -1060,14 +1067,17 @@ assert d["presets"][1] == {"name": "warmer", "settings": {"warmth": "60"}}
 # --- watch: which camera it follows, and CoreMediaIO ------------------------------------------------------------------
 
 t_watch_target() {
-    expect "one MX Brio" "$("$BIN" --test-watch-target)" "046d:0944 serial=000000000000 uid=0x100000046d0944" || return 1
+    expect "one MX Brio" "$("$BIN" --test-watch-target)" \
+        "046d:0944 serial=000000000000 uid=0x100000046d0944" || return 1
     three_cameras
     # several cameras, one known: the MX Brio, by its serial number
-    expect "the known one" "$("$BIN" --test-watch-target)" "046d:0944 serial=BRIOSERIAL1 uid=0x200000046d0944" || return 1
+    expect "the known one" "$("$BIN" --test-watch-target)" \
+        "046d:0944 serial=BRIOSERIAL1 uid=0x200000046d0944" || return 1
     # --camera: any camera, followed by its ids and serial number
     expect "a generic camera" "$("$BIN" --camera 3 --test-watch-target)" \
         "1234:5678 serial=GENERIC0002 uid=0x30000012345678" || return 1
-    expect "by serial" "$("$BIN" --camera GENERIC0001 --test-watch-target)" "1234:5678 serial=GENERIC0001 uid=0x10000012345678" || return 1
+    expect "by serial" "$("$BIN" --camera GENERIC0001 --test-watch-target)" \
+        "1234:5678 serial=GENERIC0001 uid=0x10000012345678" || return 1
     "$BIN" --camera 9 --test-watch-target > /dev/null 2>&1; rc=$?
     expect "no such camera" "$rc" 2 || return 1
     # no camera known to brioctl: wait for the MX Brio, as 1.0 did, and say so; a FaceTime camera must not be taken
@@ -1095,7 +1105,8 @@ t_watch_applies_to_the_chosen_camera() {
     three_cameras
     printf 'zoom 150\nbrightness 90\n' > settings
     # camera 3 is chosen; when it comes back the cameras are in another order, its serial number finds it
-    BRIOCTL_FAKE_AFTER=$PWD/g2.snap:$PWD/g1.snap:$PWD/brio.snap "$BIN" --camera GENERIC0002 --test-reapply "$PWD/settings" > out || return 1
+    BRIOCTL_FAKE_AFTER=$PWD/g2.snap:$PWD/g1.snap:$PWD/brio.snap \
+        "$BIN" --camera GENERIC0002 --test-reapply "$PWD/settings" > out || return 1
     has "applied" "$(cat out)" "applied (2 changed)" || return 1
     has "the chosen camera got it" "$(grep '^reg 1 11 ' g2.snap)" "cur 9600" || return 1
     has "the others did not" "$(grep '^reg 1 11 ' g1.snap)" "cur 7300" || return 1

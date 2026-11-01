@@ -1,7 +1,9 @@
-// brioctl: read and change Logitech MX Brio settings without Logitech software.
+// brioctl: read and change the settings of UVC cameras on macOS, with the Logitech extras for the MX Brio, without
+// the manufacturer's software.
 //
 // Sends UVC class requests to the camera's VideoControl interface through IOKit.
-// Only the controls listed in CTRLS are ever written; everything else is read-only.
+// Only the controls listed in CTRLS are ever written, a Logitech extension-unit control only on a model listed in
+// MODELS; everything else is read-only.
 // Where each setting lives in the camera and how it behaves: docs/registers.md.
 #include <dirent.h>
 #include <limits.h>
@@ -68,9 +70,13 @@ enum { U_CT, U_PU, U_VIDEOPIPE, U_PERIPHERAL, U_INFO, U_STATS, U_APP, U_COUNT };
 enum { CT_AE_MODE = 0x02, CT_ZOOM = 0x0b, CT_PANTILT = 0x0d };
 
 // Logitech models whose extension-unit controls brioctl knows. "full" is the camera brioctl was built on and tested
-// with. "experimental" gets only what other projects confirm (cameractrls: field of view on all of them; OpenLogi issue
-// 1222: Show Mode on the Brio 500). Any other camera, Logitech or not, gets the standard UVC controls and nothing else:
-// extension units are never written there. F_HDR: Logi Tune calls the backlight compensation control HDR.
+// with. "experimental" gets only what other projects confirm. Any other camera, Logitech or not, gets the standard UVC
+// controls and nothing else: extension units are never written there.
+// Sources: cameractrls (soyersoyer/cameractrls v0.6.10, cameractrls.py lines 1367-1381 and 1570-1585) offers the field of
+// view, selector 5 of the Videopipe unit (GUID 49e40215-...), 1 byte, 0 = 90, 1 = 78, 2 = 65 degrees, for these PIDs and
+// names and no others. OpenLogi issue 1222 (a Brio 500, firmware 0.21) adds Show Mode, selector 13, 1 byte, 0 or 1, and
+// says the HDR switch of Logi Tune is the backlight compensation control of the processing unit. F_HDR (the control is
+// called hdr, not backlight) is set for the MX Brio, the Brio 500, the Brio and the Brio 4K Stream Edition.
 enum { S_STANDARD, S_EXPERIMENTAL, S_FULL };
 static const char *const SUPPORT[] = {"standard", "experimental", "full"};
 enum { F_FOV = 1, F_SHOW = 2, F_FULL = 4, F_HDR = 8, F_NOHDR = 16 };  // F_NOHDR is derived: the name is backlight
@@ -130,17 +136,20 @@ typedef struct {
 
 // What is written about a control: the names of its values are added after a colon (or where the help has "%s"), a
 // numeric control's range comes from the camera. Order matters for save and apply: auto modes come before the values
-// they gate. Standard controls are shown when the camera declares them, Logitech ones when the model gets them (MODELS).
+// they gate. Standard controls are shown when the camera declares them, Logitech ones when the model gets them
+// (MODELS).
 static const Ctrl CTRLS[] = {
     {NULL, "Logitech (mapped from Logi Tune)", .group = "Logitech"},
-    {"fov",        "field of view in degrees",                            U_VIDEOPIPE,  0x05, 1, FOV_MAP, .need = F_FOV},
-    {"showmode",   "Show Mode (flip the picture when tilted to the desk)", U_VIDEOPIPE, 0x0d, 1, ON_OFF, .need = F_SHOW},
-    {"hdr",        "HDR (UVC backlight compensation)",                    U_PU,         0x01, 2, ON_OFF, .need = F_HDR},
-    {"warmth",     "white balance warmth, 50 = neutral",                  U_VIDEOPIPE,  0x15, 1, .need = F_FULL},
-    {"tint",       "tint, 50 = neutral",                                  U_VIDEOPIPE,  0x12, 1, .need = F_FULL},
-    {"vibrance",   "vibrance, 128 = neutral",                             U_VIDEOPIPE,  0x14, 1, .need = F_FULL},
-    {"expcomp",    "exposure compensation, 128 = neutral",                U_VIDEOPIPE,  0x13, 1, .need = F_FULL},
-    {"mic",        "camera microphone%s (camera restarts on change)",     U_PERIPHERAL, 0x10, 1, ON_OFF, .need = F_FULL},
+    {"fov",        "field of view in degrees",                  U_VIDEOPIPE,  0x05, 1, FOV_MAP, .need = F_FOV},
+    {"showmode",   "Show Mode (flip the picture when tilted to the desk)",
+                                                                U_VIDEOPIPE,  0x0d, 1, ON_OFF, .need = F_SHOW},
+    {"hdr",        "HDR (UVC backlight compensation)",          U_PU,         0x01, 2, ON_OFF, .need = F_HDR},
+    {"warmth",     "white balance warmth, 50 = neutral",        U_VIDEOPIPE,  0x15, 1, .need = F_FULL},
+    {"tint",       "tint, 50 = neutral",                        U_VIDEOPIPE,  0x12, 1, .need = F_FULL},
+    {"vibrance",   "vibrance, 128 = neutral",                   U_VIDEOPIPE,  0x14, 1, .need = F_FULL},
+    {"expcomp",    "exposure compensation, 128 = neutral",      U_VIDEOPIPE,  0x13, 1, .need = F_FULL},
+    {"mic",        "camera microphone%s (camera restarts on change)",
+                                                                U_PERIPHERAL, 0x10, 1, ON_OFF, .need = F_FULL},
     {NULL, "Framing", .group = "Framing"},
     {"zoom",       "zoom, 100 = 1x on Logitech cameras",                  U_CT, CT_ZOOM, 2},
     {"pan",        "move the zoomed frame, in degrees",                   U_CT, CT_PANTILT, 8, NULL, 0, 4, 3600, 1},
@@ -168,7 +177,7 @@ static const Ctrl CTRLS[] = {
     {"privacy",    "privacy shutter",                                     U_CT, 0x11, 1, ON_OFF},
     {NULL, "Found in the firmware, not used by Logitech's apps", .group = "Found in the firmware"},
     // Peripheral 3 also holds a speed (u16, 10-100); 10, 50 and 100 gave the same 3 s glide, so it is not offered.
-    {"smooth",     "glide to new zoom and pan in about 3 s",              U_PERIPHERAL, 0x03, 3, ON_OFF, 0, 1, .need = F_FULL},
+    {"smooth",     "glide to new zoom and pan in about 3 s",    U_PERIPHERAL, 0x03, 3, ON_OFF, 0, 1, .need = F_FULL},
 };
 #define NCTRLS (int)(sizeof CTRLS / sizeof *CTRLS)
 
@@ -219,7 +228,8 @@ static void guidString(const uint8_t *g, char s[37]) {
 }
 
 // Matching dictionary for a vendor and product id; the key names differ between USB and HID.
-static CFMutableDictionaryRef vidPid(CFMutableDictionaryRef m, CFStringRef vidKey, CFStringRef pidKey, int vid, int pid) {
+static CFMutableDictionaryRef vidPid(CFMutableDictionaryRef m, CFStringRef vidKey, CFStringRef pidKey, int vid,
+                                     int pid) {
     CFNumberRef nv = CFNumberCreate(NULL, kCFNumberIntType, &vid), np = CFNumberCreate(NULL, kCFNumberIntType, &pid);
     CFDictionarySetValue(m, vidKey, nv);
     CFDictionarySetValue(m, pidKey, np);
@@ -410,7 +420,7 @@ static int fakeLoad(const char *path) {
 // The snapshot paths in BRIOCTL_FAKE; -1 if it is not set. Once a camera is chosen, BRIOCTL_FAKE_AFTER (if set) is the
 // list instead: the cameras came back in another order, as after a reconnect.
 static int fakePaths(char paths[][PATH_MAX], int max) {
-    const char *env = target.vid && getenv("BRIOCTL_FAKE_AFTER") ? getenv("BRIOCTL_FAKE_AFTER") : getenv("BRIOCTL_FAKE");
+    const char *after = getenv("BRIOCTL_FAKE_AFTER"), *env = target.vid && after ? after : getenv("BRIOCTL_FAKE");
     if (!env || !*env) { fprintf(stderr, "BRIOCTL_FAKE is not set (path of a brioctl snapshot)\n"); return -1; }
     int n = 0;
     while (*env && n < max) {
@@ -673,7 +683,8 @@ static void dropCameras(CamInfo *l, int n) {
         if (l[i].svc) IOObjectRelease(l[i].svc);
 }
 
-// The camera in l that is the target: same ids and serial, and the same location if there is a choice. -1 if it is gone.
+// The camera in l that is the target: same ids and serial, and the same location if there is a choice. -1 if it is
+// gone.
 static int findTarget(const CamInfo *l, int n) {
     int best = -1;
     for (int i = 0; i < n; i++) {
@@ -815,7 +826,8 @@ static int avail(const Cam *c, const Ctrl *k) {
     if (k->need && (c->feat & k->need) != k->need) return 0;
     if (isXU(k)) return 1;
     for (size_t i = 0; i < sizeof STD_BITS / sizeof *STD_BITS; i++)
-        if (STD_BITS[i].unit == k->unit && STD_BITS[i].sel == k->sel) return c->bm[k->unit == U_PU] >> STD_BITS[i].bit & 1;
+        if (STD_BITS[i].unit == k->unit && STD_BITS[i].sel == k->sel)
+            return c->bm[k->unit == U_PU] >> STD_BITS[i].bit & 1;
     return 0;
 }
 
@@ -968,7 +980,9 @@ static int readFirmware(Cam *c, char fw[16]) {
 // 1 while the camera is tilted to the desk and shows it (Show Mode), 0 if not, -1 if it does not say.
 static int readDesk(Cam *c) {
     uint8_t active = 0;
-    if (!(c->feat & F_FULL) || !c->unit[U_INFO] || request(c, GET_CUR, c->unit[U_INFO], INFO_SHOWMODE_ACTIVE, &active, 1, NULL)) return -1;
+    if (!(c->feat & F_FULL) || !c->unit[U_INFO] ||
+        request(c, GET_CUR, c->unit[U_INFO], INFO_SHOWMODE_ACTIVE, &active, 1, NULL))
+        return -1;
     return active != 0;
 }
 
@@ -1101,7 +1115,8 @@ static void jstr(const char *s) {
                 cp = cp << 6 | (s[i] & 63);
             }
             if (!ok || cp > 0x10ffff || (cp >= 0xd800 && cp < 0xe000)) cp = 0xfffd, len = ok ? len : 1;
-            if (cp > 0xffff) printf("\\u%04x\\u%04x", 0xd800 + ((cp - 0x10000) >> 10), 0xdc00 + ((cp - 0x10000) & 0x3ff));
+            if (cp > 0xffff)
+                printf("\\u%04x\\u%04x", 0xd800 + ((cp - 0x10000) >> 10), 0xdc00 + ((cp - 0x10000) & 0x3ff));
             else printf("\\u%04x", cp);
             s += len;
         }
@@ -1216,7 +1231,8 @@ static int showJson(Cam *c) {
         jvalue(k, ds);
         printf(",\"auto\":%s,\"group\":", autoNow ? "true" : "false");
         jstr(group);
-        printf(",\"writable\":%s,\"kind\":\"%s\"", info >= 0 && (info & INFO_SET) && !(info & INFO_AUTO) ? "true" : "false",
+        int writable = info >= 0 && (info & INFO_SET) && !(info & INFO_AUTO);
+        printf(",\"writable\":%s,\"kind\":\"%s\"", writable ? "true" : "false",
                !k->map ? "number" : k->map == ON_OFF ? "bool" : "choice");
         if (!k->map) {
             Range r;
@@ -1665,10 +1681,10 @@ static void hidRemoved(void *ctx, IOReturn result, void *sender, IOHIDDeviceRef 
 }
 
 // Video start for every camera, through CoreMediaIO. macOS lists each camera there. For a USB UVC camera the device UID
-// is "0x" + the USB location id + vendor id + product id, the ids as 4 hex digits ("0x110000046d0944" for the MX Brio at
-// location 0x110000), the model UID is "UVC Camera VendorID_1133 ProductID_2372" (decimal) and the transport is 'usb '
-// (found on macOS 26 with an MX Brio). kCMIODevicePropertyDeviceIsRunningSomewhere is true while any app streams from
-// the camera. Reading it and listening to it does not open the camera and needs no camera permission.
+// is "0x" + the USB location id + vendor id + product id, the ids as 4 hex digits ("0x110000046d0944" for the MX Brio
+// at location 0x110000), the model UID is "UVC Camera VendorID_1133 ProductID_2372" (decimal) and the transport is
+// 'usb ' (found on macOS 26 with an MX Brio). kCMIODevicePropertyDeviceIsRunningSomewhere is true while any app
+// streams from the camera. Reading it and listening to it does not open the camera and needs no camera permission.
 static CMIOObjectID cmioDev;  // the CoreMediaIO device being listened to, 0 if none
 static int cmioRunning;       // its DeviceIsRunningSomewhere the last time we looked
 
@@ -2064,7 +2080,7 @@ static int snapshot(Cam *c, const char *path) {
 }
 
 static void usage(FILE *f) {
-    fprintf(f, "usage: brioctl [--camera ID] COMMAND   ID: index or serial number from 'brioctl list', or location 0x...\n"
+    fprintf(f, "usage: brioctl [--camera ID] COMMAND   ID: index or serial from 'brioctl list', or location 0x...\n"
                "       brioctl                     show settings\n"
                "       brioctl list [--json]       list the UVC cameras\n"
                "       brioctl --json              the same as one JSON object, for scripts\n"
@@ -2079,7 +2095,7 @@ static void usage(FILE *f) {
                "       brioctl dump                list all UVC units and extension controls (read-only)\n"
                "       brioctl snapshot [FILE]     write every register brioctl reads, serial masked (read-only)\n"
                "       brioctl --version           print the version\n");
-    fprintf(f, "\nWhat a camera has depends on the camera: 'brioctl' shows its settings and their ranges. Setting names:\n");
+    fprintf(f, "\nWhich of these a camera has depends on the camera; 'brioctl' shows them with their ranges.\n");
     for (int i = 0; i < NCTRLS; i++) {
         char help[192];
         helpText(NULL, &CTRLS[i], help, sizeof help);

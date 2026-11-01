@@ -1,8 +1,9 @@
 # brioctl
 
-brioctl is a command-line tool for macOS that reads and changes the settings of the Logitech MX Brio webcam
-(USB `046d:0944`) without Logitech's desktop software. It covers the field of view, Show Mode, HDR, white balance
-warmth, tint, vibrance, zoom, pan and tilt, exposure, focus and the camera microphone, and it can re-apply your
+brioctl is a command-line tool for macOS that reads and changes the settings of UVC webcams, and of the Logitech MX Brio
+(USB `046d:0944`) in particular, without the manufacturer's desktop software. For the MX Brio it covers the field of
+view, Show Mode, HDR, white balance warmth, tint, vibrance, zoom, pan and tilt, exposure, focus and the camera
+microphone. For any other UVC camera it offers the standard controls the camera declares. It can re-apply your
 settings every time the camera is connected or video starts. It is one C file that talks to the camera through IOKit.
 It needs no driver, no root and no third-party library.
 
@@ -10,6 +11,9 @@ Not affiliated with or endorsed by Logitech. See [Disclaimer](#disclaimer).
 
 ## Features
 
+- Any UVC camera: `brioctl list` shows them, `--camera` picks one, and `show` lists the standard controls the camera
+  declares (exposure, gain, white balance, focus, brightness, contrast, hue, gamma, sharpness, zoom, pan, tilt, roll,
+  iris, privacy and more) with the camera's own ranges.
 - Settings that Logitech's apps control through the camera: field of view (90, 78 or 65 degrees), Show Mode, HDR,
   white balance warmth, tint, vibrance, exposure compensation, camera microphone on and off.
 - Digital zoom, pan and tilt, and smooth zoom: zoom and pan glide to the new value in about 3 seconds.
@@ -26,7 +30,8 @@ Not affiliated with or endorsed by Logitech. See [Disclaimer](#disclaimer).
 ## Requirements
 
 - macOS 12 or later, on Apple Silicon or Intel.
-- A Logitech MX Brio (`046d:0944`). Tested with firmware 1.1.394.
+- A UVC camera. Full support is for the Logitech MX Brio (`046d:0944`), tested with firmware 1.1.394. See
+  [Cameras](#cameras) for the others.
 - To build from source: Xcode or the Command Line Tools (`xcode-select --install`).
 
 ## Install
@@ -69,6 +74,8 @@ the README and the license into `brioctl-VERSION-macos-universal.tar.gz`.
 
 ```sh
 brioctl                              # show all settings
+brioctl list                         # the UVC cameras brioctl finds (add --json for scripts)
+brioctl --camera 2 fov 78            # use another camera: an index or serial number from the list, or a location
 brioctl --json                       # the same as one JSON object, for scripts
 brioctl get fov                      # print one value only (settings and micgain); exit code 1 if unreadable
 brioctl fov 78 zoom 115 flicker 50   # change one or more settings
@@ -79,7 +86,7 @@ brioctl smooth on                    # zoom and pan glide to the new value (abou
 brioctl save                         # save the current settings to ~/.config/brioctl/settings
 brioctl save meeting                 # or to ~/.config/brioctl/meeting
 brioctl apply                        # put the saved settings back (apply meeting, apply warmer, ...)
-brioctl profiles                     # list the presets and the saved files
+brioctl profiles [--json]            # list the presets and the saved files
 brioctl defaults                     # camera default values, except mic and showmode; no restart
 brioctl factory-reset --yes          # restart the camera with factory settings, then restore yours
 brioctl watch                        # apply now, on connect and on video start (see below)
@@ -90,6 +97,37 @@ brioctl help
 ```
 
 When several settings are given in one command, `mic` is written last: changing it restarts the camera.
+
+## Cameras
+
+`brioctl list` finds every USB device that has a UVC VideoControl interface:
+
+```
+#   id         name        model       support       serial        location
+1   046d:0944  MX Brio     MX Brio     full          XXXXXXXXXXXX  0x110000
+2   1234:5678  Some Cam    -           standard      ABC123        0x120000
+```
+
+`--camera ID` before the command (or anywhere in the line) chooses one. ID is the index, the serial number or the USB
+location from the list. `brioctl list --json` prints the same as `{"cameras":[{"index":1,"vid":"046d",...}]}`. Without
+`--camera`, brioctl uses the only camera, or, if there are several, the only one it knows (support `full` or
+`experimental`). If it cannot choose, it prints the list and exits with status 2. `watch` uses the same rules, except
+that without `--camera` it never takes a camera it does not know: it waits for the MX Brio instead, so a LaunchAgent
+that was started without the MX Brio does not apply your MX Brio settings to another camera.
+
+| Support        | Cameras                                                                                                          | What brioctl does                                                                                                                                                                          |
+| -------------- | ---------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `full`         | Logitech MX Brio (`046d:0944`)                                                                                   | Everything in this document.                                                                                                                                                               |
+| `experimental` | Logitech Brio (`085e`), Brio 500 (`0943`), Brio 501 (`0946`), Brio 505 (`0919`), Brio 4K Stream Edition (`086b`) | The standard controls, the field of view, and `hdr` (Brio, Brio 500, 4K Stream Edition) and Show Mode (Brio 500). Other projects report that these work. They are not tested with brioctl. |
+| `standard`     | Every other UVC camera                                                                                           | The standard UVC controls the camera declares. brioctl never writes to an extension unit of such a camera.                                                                                 |
+
+`show` of an experimental camera says so in one line. If you have one of those cameras, please run
+`brioctl snapshot report.snap` and send the file.
+
+For a standard control to appear, the camera has to declare it in the descriptor (the control bitmaps of its camera
+terminal and processing unit). The ranges in `show` are the camera's own (`GET_MIN` and `GET_MAX`). The backlight
+compensation control is called `hdr` on the Logitech cameras that have an HDR switch (it is on or off there) and
+`backlight` (a number) on the others. Either name is accepted on every camera.
 
 ## Example output
 
@@ -103,40 +141,40 @@ Status (read-only)
   rightsight  off, speed normal, framing normal (stored for Logitech's app)
 
 Logitech (mapped from Logi Tune)
-  fov         78        default 90        field of view in degrees: 90, 78, 65
-  showmode    on        default off       Show Mode, flip the picture when tilted to the desk
-  hdr         on        default on        HDR (UVC backlight compensation): on, off
-  warmth      62        default 50        white balance warmth: 0-100, 50 = neutral
-  tint        50        default 50        tint: 0-100, 50 = neutral
-  vibrance    128       default 128       vibrance: 0-255, 128 = neutral
-  expcomp     128       default 128       exposure compensation: 0-255, 128 = neutral
-  mic         on        default off       camera microphone: on, off (camera restarts on change)
+  fov         78        default 90                    field of view in degrees: 90, 78, 65
+  showmode    on        default off                   Show Mode (flip the picture when tilted to the desk): on, off
+  hdr         on        default on                    HDR (UVC backlight compensation): on, off
+  warmth      62        default 50        0-100       white balance warmth, 50 = neutral
+  tint        50        default 50        0-100       tint, 50 = neutral
+  vibrance    128       default 128       0-255       vibrance, 128 = neutral
+  expcomp     128       default 128       0-255       exposure compensation, 128 = neutral
+  mic         on        default off                   camera microphone: on, off (camera restarts on change)
 
 Framing
-  zoom        115       default 100       digital zoom: 100 = 1x ... 400 = 4x
-  pan         0         default 0         move the zoomed frame, degrees: -20...20
-  tilt        0         default 0         move the zoomed frame, degrees: -20...20
+  zoom        115       default 100       100-400     zoom, 100 = 1x on Logitech cameras
+  pan         0         default 0         -20..20     move the zoomed frame, in degrees
+  tilt        0         default 0         -20..20     move the zoomed frame, in degrees
 
 Exposure and image (standard UVC)
-  priority    exposure  default ?         in low light keep: fps, exposure
-  ae          auto      default auto      auto exposure: auto, manual
-  exposure    1250*     default 156       exposure time in 100 us units: 3-2047 (ae manual)
-  gain        0*        default 0         gain: 0-255 (ae manual)
-  flicker     50        default 60        anti-flicker, mains frequency in Hz: 50, 60
-  brightness  128       default 128       brightness: 0-255
-  contrast    128       default 128       contrast: 0-255
-  saturation  128       default 128       saturation: 0-255
-  sharpness   128       default 128       sharpness: 0-255
-  awb         on        default on        auto white balance: on, off
-  wb          4151*     default 5000      white balance in kelvin: 2800-7500 (awb off)
-  af          on        default on        autofocus: on, off
-  focus       14*       default 0         focus: 0-255 (af off)
+  priority    exposure  default ?                     in low light keep: fps, exposure
+  ae          auto      default auto                  auto exposure: auto, manual
+  exposure    1250*     default 156       3-2047      exposure time in 100 us units (ae manual)
+  gain        0*        default 0         0-255       gain
+  flicker     50        default 60                    anti-flicker, mains frequency in Hz: 50, 60
+  brightness  128       default 128       0-255       brightness
+  contrast    128       default 128       0-255       contrast
+  saturation  128       default 128       0-255       saturation
+  sharpness   128       default 128       0-255       sharpness
+  awb         on        default on                    auto white balance: on, off
+  wb          4100*     default 5000      2800-7500   white balance in kelvin (awb off)
+  af          on        default on                    autofocus: on, off
+  focus       14*       default 0         0-255       focus (af off)
 
 Found in the firmware, not used by Logitech's apps
-  smooth      off       default off       glide to new zoom and pan in about 3 s: on, off
+  smooth      off       default off                   glide to new zoom and pan in about 3 s: on, off
 
 Microphone (macOS)
-  micgain     0.2785    default -         input volume: 0-1
+  micgain     0.2785    default -         0-1         input volume
 
 * set automatically right now
 ```
@@ -147,8 +185,11 @@ only after switching the automatic mode off, and `save` does not store it.
 The Status section only reports: whether video is running and at what resolution, whether the indicator LED is on,
 whether the camera is tilted to the desk (Show Mode) and what is stored in the RightSight settings block.
 
-`brioctl`, `brioctl --json` and `brioctl dump` print the camera's serial number. Mask it before you post their output.
-`brioctl snapshot` and `tools/hidmon` already do.
+`brioctl`, `brioctl --json`, `brioctl list` and `brioctl dump` print the camera's serial number. Mask it before you post
+their output. `brioctl snapshot` and `tools/hidmon` already do.
+
+`brioctl help` lists all setting names. What a camera has depends on the camera: `brioctl` shows only the settings it
+has, with its own range for each number.
 
 ## Settings
 
@@ -180,11 +221,21 @@ whether the camera is tilted to the desk (Show Mode) and what is stored in the R
 | `focus`      | 0 to 255                              | Focus. Can be written only with `af` off.                                                                                    |
 | `smooth`     | `on`, `off`                           | Zoom and pan glide to a new value in about 3 seconds. The camera forgets it on power loss.                                   |
 | `micgain`    | 0 to 1                                | Input volume of the camera microphone in macOS. Not a camera register.                                                       |
+| `backlight`  | number                                | Backlight compensation of a camera without an HDR switch. The same control as `hdr`.                                         |
+| `hue`        | number, may be negative               | Other cameras. Hue. Can be written only with `hueauto` off.                                                                  |
+| `hueauto`    | `on`, `off`                           | Other cameras. Automatic hue.                                                                                                |
+| `gamma`      | number                                | Other cameras. Gamma.                                                                                                        |
+| `iris`       | number (f-number times 100)           | Other cameras. Iris.                                                                                                         |
+| `roll`       | degrees, may be negative              | Other cameras. Rotates the picture.                                                                                          |
+| `privacy`    | `on`, `off`                           | Other cameras. Privacy shutter; many cameras only report it.                                                                 |
 
 `brioctl help` prints the same list. The camera's own default for each setting is in the `default` column of the
-output above.[^defaults]
+output above.[^defaults] The values in the table are those of the MX Brio. Other cameras have their own ranges and
+choices: `anti-flicker` can also be `off` or `auto` and `ae` can be `shutter` where the camera lists it, and `show`
+prints what the camera accepts.
 
-[^defaults]: For `showmode` and `mic` the camera reports "off" as the default, but after a factory reset the firmware
+[^defaults]:
+    For `showmode` and `mic` the camera reports "off" as the default, but after a factory reset the firmware
     turns both on. See [Factory reset](docs/registers.md#factory-reset) in the register notes. `brioctl defaults`
     leaves those two settings alone for this reason.
 
@@ -205,6 +256,25 @@ output above.[^defaults]
 `colorboost` needs an explanation. The camera has a hidden Color Boost switch that doubles the saturation, but it is
 lost when the video restarts and when saturation is written. `saturation 255` gives the same picture from the default
 128, and the camera keeps it, so the preset uses that. The measurements are in [docs/registers.md](docs/registers.md).
+
+## JSON
+
+`brioctl --json` prints one JSON object on one line, for scripts and apps. Errors are not JSON: they go to stderr as
+text with a non-zero exit status.
+
+- `device`: `model` (the name in brioctl's table, or null), `name` (the USB product name), `vid`, `pid` (hex strings),
+  `support`, `index`, `location`, `serial`, `firmware` and `colour` (null where the camera does not say).
+- `status`: `video`, `led`, `desk_view` and `rightsight`, null where the camera is not an MX Brio.
+- `settings`: one entry for each setting the camera has, named as on the command line. Each has `value`, `default`,
+  `auto` (an automatic mode drives it now), `group` (`Logitech`, `Framing`, `Exposure and image` or `Found in the
+firmware`), `writable` (it can be set and no automatic mode drives it now), `kind` (`number`, `choice` or `bool`)
+  and `help`. A number has `min`, `max` and `step`, scaled like the value (pan and tilt in degrees); a choice has
+  `choices`, the names it accepts.
+- `micgain`: the macOS input volume, or null.
+
+`brioctl list --json` prints `{"cameras":[{"index":1,"vid":"046d","pid":"0944","name":"MX Brio","model":"MX Brio",
+"support":"full","serial":"...","location":"0x110000"}]}`. `brioctl profiles --json` prints
+`{"presets":[{"name":"warmer","settings":{"warmth":"60"}}],"saved":["meeting","settings"],"dir":"/Users/you/.config/brioctl"}`.
 
 ## Apply settings automatically
 
@@ -227,14 +297,20 @@ What `watch` does:
 
 - It applies `~/.config/brioctl/settings` (or the file you name: `brioctl watch FILE`) when it starts and every time
   the camera is connected. A camera that is still starting up is retried a few times.
-- When video starts, the camera sends HID report `0x40`. `watch` waits 2 seconds after the last such report and applies
-  the file again, because image settings can be lost when the stream starts.
+- When video starts, `watch` waits 2 seconds and applies the file again, because image settings can be lost when the
+  stream starts. The MX Brio announces it with HID report `0x40`. For every camera `watch` also listens to CoreMediaIO:
+  the property `DeviceIsRunningSomewhere` of the camera's device changes from false to true while some app starts to
+  use the camera. Reading and listening to it does not open the camera and needs no camera permission. Both signals
+  feed the same timer, so one start gives one apply.
 - It never changes `mic` while video is on. The camera restarts after that write, which would cut the picture and the
   sound in the middle of a call. If the file differs from the camera, the log says `mic: not changed while video is on`.
 - While the camera shows the desk (Show Mode, `desk view on` in the status), it skips `fov`, `zoom`, `pan` and `tilt`.
   The camera sets those itself at that moment. The log has one line about it. A manual `brioctl apply` is not affected.
-- It logs only the settings it actually changed. The lines `HID listening` and `HID device removed` show whether
-  `watch` is listening to the camera after the camera has restarted. If macOS does not let `watch` open the HID
+- It follows one camera: the one you chose with `--camera`, found again after a reconnect by its vendor and product id
+  and serial number. If the file was saved from another model, the log has a warning.
+- It logs only the settings it actually changed. The lines `HID listening`, `HID device removed`,
+  `CoreMediaIO listening` and `CoreMediaIO device removed` show whether `watch` is listening to the camera after the
+  camera has restarted. If macOS does not let `watch` open the HID
   interface, it logs a warning and applies settings on connect only.
 
 A log looks like this:
@@ -252,26 +328,32 @@ warmth 55
 brioctl writes to the camera, so it is careful about what it writes.
 
 - It writes only the controls in its own table. Everything else is read-only.
+- Logitech extension units are written only on the models in the table above, and only the controls each model is
+  known to have: the field of view on all of them, Show Mode on the Brio 500 and the MX Brio, the rest on the MX Brio.
+  On any other camera, brioctl writes standard UVC controls only. The values of such a control come from brioctl's own
+  table, never from the camera's `GET_MAX` (the field of view reports 255 as its maximum and only 0, 1 and 2 do
+  anything).
 - It never writes these registers: the factory reset (except for `factory-reset --yes`), the flash lock, the lens
   motor and lens memory service command, the restart command, the factory optics calibration switch, the chip debug
   unit and the chip command and firmware update unit. What each one does is described in
   [docs/registers.md](docs/registers.md#registers-brioctl-never-writes).
-- For the Logitech extension controls it first reads the control's size (`GET_LEN`). If the firmware has changed the
-  layout, the write is cancelled.
+- For the Logitech extension controls it first reads the control's size (`GET_LEN`) and `GET_INFO`. If the firmware has
+  changed the layout, or the control does not say it can be written, the write is cancelled.
 - It reads `GET_INFO` and refuses to write a value that an automatic mode is setting right now.
 - It checks the value against the `GET_MIN` and `GET_MAX` of the camera before writing.
 - Pan and tilt share one register, and `smooth` shares one with its speed. The other fields are read first and kept.
 - A value that is already set is not written again, which avoids needless flash wear and camera restarts.
 - After each write it reads the value back. If the camera did not keep it, brioctl says so and exits with an error.
 - `save` leaves out values that the camera would not accept.
-- `factory-reset` does nothing without `--yes`. With it, your settings are saved to `~/.config/brioctl/before-reset`
+- `factory-reset` works on the MX Brio only. It does nothing without `--yes`. With it, your settings are saved to `~/.config/brioctl/before-reset`
   first and applied again after the camera is back.
-- `dump` asks the service registers only for `GET_INFO` and `GET_LEN`. `snapshot` never reads the value of the factory
+- `dump` asks the service registers, and all registers of an extension unit it does not know, only for `GET_INFO` and
+  `GET_LEN`. `snapshot` never reads the value of the factory
   reset or the flash lock. `tools/hidmon` and `tools/uvcwatch` have no write code at all.
 
 None of this is a guarantee. You write to your camera at your own risk.
 
-## What this camera cannot do
+## What the MX Brio cannot do
 
 - The indicator LED. The camera ignores LED writes. Retail units are locked in a state where the firmware drops them.
 - RightLight. The register exists and accepts a write, but nothing changes in the picture, the exposure or the gain.
@@ -286,7 +368,8 @@ None of this is a guarantee. You write to your camera at your own risk.
 brioctl sends USB Video Class requests (`GET_CUR`, `SET_CUR`, `GET_MIN` and so on) to the camera's VideoControl
 interface with `IOUSBDeviceInterface::DeviceRequestTO`. The device is not opened or seized, so the camera driver keeps
 working, settings can be changed while video is streaming, and no root is needed. The units are found by reading the
-configuration descriptor, and the Logitech extension units by their GUID.
+configuration descriptor, and the Logitech extension units by their GUID. The standard controls a camera has are the
+ones its camera terminal and processing unit declare in their `bmControls`.
 
 The standard controls follow the UVC specification. The Logitech extension controls are not documented by Logitech.
 The register map in [docs/registers.md](docs/registers.md) comes from observing Logitech's apps, from analysing the
@@ -303,7 +386,9 @@ make test
 
 The tests run without a camera. The same `brioctl.c` is built with `-DBRIOCTL_FAKE`, and a camera emulator answers its
 requests from a register snapshot, `tests/mxbrio-1.1.394.snap`, which was taken from a real MX Brio with
-`brioctl snapshot`.
+`brioctl snapshot`. `BRIOCTL_FAKE` can name several snapshots separated by `:`, which gives several cameras for `list`
+and `--camera`. `tests/make-fixtures.py` (`make fixtures`) derives the other fixtures from the MX Brio snapshot: a
+generic UVC camera without extension units, one with more standard controls, and a simulated Brio 500.
 
 For a bug report, run `brioctl snapshot report.snap` and attach the file. It contains the USB descriptor and every
 register brioctl reads, with the serial number replaced by zeros. It is read-only.

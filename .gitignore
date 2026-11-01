@@ -4,3 +4,4 @@
 /tests/brioctl-fake
 /tools/hidmon
 /tools/uvcwatch
+/tests/brioctl-fake.dSYM
