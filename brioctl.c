@@ -1838,7 +1838,7 @@ static void hidSetup(void) {
         return;
     }
     stamp();
-    printf("warning: cannot listen for video start (HID open failed 0x%x), applying on connect only\n", kr);
+    printf("warning: HID open failed (0x%x); video start is detected through CoreMediaIO only\n", kr);
     IOHIDManagerUnscheduleFromRunLoop(mgr, CFRunLoopGetCurrent(), kCFRunLoopDefaultMode);
     CFRelease(mgr);
 }
