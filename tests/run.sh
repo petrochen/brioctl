@@ -1,18 +1,22 @@
 #!/bin/sh
 # Offline tests for brioctl: the same source built with -DBRIOCTL_FAKE, so it talks to a camera that is read from a
 # snapshot file (tests/mxbrio-1.1.394.snap, taken from a real MX Brio with `brioctl snapshot`) instead of USB.
-# Every test gets its own copy of the snapshot and its own HOME. Run it with `make test`.
+# Every test gets its own copy of the snapshot (camera.snap) and of the other fixtures (generic.snap, extra.snap,
+# brio500.snap: see make-fixtures.py) and its own HOME. Run it with `make test`.
 set -u
 
 HERE=$(cd "$(dirname "$0")" && pwd) || exit 1
 BIN=${BIN:-$HERE/brioctl-fake}
 FIXTURE=$HERE/mxbrio-1.1.394.snap
+GENERIC=$HERE/generic-uvc.snap EXTRA=$HERE/generic-uvc-extra.snap BRIO500=$HERE/brio500-sim.snap
 ROOT=$(mktemp -d "${TMPDIR:-/tmp}/brioctl-test.XXXXXX") || exit 1
 trap 'rm -rf "$ROOT"' EXIT
 trap 'exit 1' HUP INT TERM
 
 [ -x "$BIN" ] || { echo "Bail out! $BIN is not built (make test builds it)"; exit 1; }
-[ -f "$FIXTURE" ] || { echo "Bail out! missing $FIXTURE"; exit 1; }
+for f in "$FIXTURE" "$GENERIC" "$EXTRA" "$BRIO500"; do
+    [ -f "$f" ] || { echo "Bail out! missing $f (make fixtures)"; exit 1; }
+done
 
 # Never run these tests against a build that talks to USB: only the fake build says this without BRIOCTL_FAKE.
 case $(env -u BRIOCTL_FAKE "$BIN" show 2>&1 < /dev/null) in
@@ -467,6 +471,149 @@ t_needs_a_snapshot() {
     has "message" "$out" "BRIOCTL_FAKE is not set"
 }
 
+# --- cameras: list, choice, --camera ------------------------------------------------------------------------------
+
+# three_cameras: a generic camera, the MX Brio and another generic camera, with serials GENERIC0001, BRIOSERIAL1 and
+# GENERIC0002, at locations 0x100000, 0x200000 and 0x300000
+three_cameras() {
+    sed 's/^serial .*/serial GENERIC0001/' generic.snap > g1.snap
+    sed 's/^serial .*/serial BRIOSERIAL1/' camera.snap > brio.snap
+    sed 's/^serial .*/serial GENERIC0002/' generic.snap > g2.snap
+    BRIOCTL_FAKE=$PWD/g1.snap:$PWD/brio.snap:$PWD/g2.snap
+    export BRIOCTL_FAKE
+}
+
+which_camera() {  # which_camera ARGS...: the device line of the snapshot of the camera brioctl chose
+    "$BIN" "$@" snapshot 2>&1 | grep '^device'
+}
+
+t_list() {
+    three_cameras
+    out=$("$BIN" list); rc=$?
+    expect "status" "$rc" 0 || return 1
+    matches "header" "$out" '^# +id +name +model +support +serial +location$' || return 1
+    matches "generic row" "$out" '^1 +1234:5678 +Generic UVC +- +standard +GENERIC0001 +0x100000$' || return 1
+    matches "mx brio row" "$out" '^2 +046d:0944 +MX Brio +MX Brio +full +BRIOSERIAL1 +0x200000$' || return 1
+    matches "third row" "$out" '^3 +1234:5678 +Generic UVC +- +standard +GENERIC0002 +0x300000$' || return 1
+    want='{"cameras":[{"index":1,"vid":"1234","pid":"5678","name":"Generic UVC","model":null,"support":"standard",'
+    want="$want"'"serial":"GENERIC0001","location":"0x100000"},{"index":2,"vid":"046d","pid":"0944","name":"MX Brio",'
+    want="$want"'"model":"MX Brio","support":"full","serial":"BRIOSERIAL1","location":"0x200000"},{"index":3,'
+    want="$want"'"vid":"1234","pid":"5678","name":"Generic UVC","model":null,"support":"standard","serial":"GENERIC0002",'
+    want="$want"'"location":"0x300000"}]}'
+    expect "json" "$("$BIN" list --json)" "$want" || return 1
+    BRIOCTL_FAKE=$PWD/brio500.snap
+    has "experimental" "$("$BIN" list)" "046d:0943  Brio 500" || return 1
+    has "experimental level" "$("$BIN" list)" "experimental" || return 1
+    BRIOCTL_FAKE=:
+    expect "no camera" "$("$BIN" list)" "no UVC camera found" || return 1
+    expect "no camera, json" "$("$BIN" list --json)" '{"cameras":[]}' || return 1
+    "$BIN" list extra > /dev/null 2>&1; rc=$?
+    expect "list takes only --json" "$rc" 2
+}
+
+t_default_camera() {
+    # one camera: that one
+    expect "one camera" "$(which_camera)" "device 046d 0944" || return 1
+    three_cameras
+    # several, one of them known to brioctl: that one
+    expect "the only known camera" "$(which_camera)" "device 046d 0944" || return 1
+    # several, none known: exit 2 and the list
+    BRIOCTL_FAKE=$PWD/g1.snap:$PWD/g2.snap
+    out=$("$BIN" 2>&1 > /dev/null); rc=$?
+    expect "status" "$rc" 2 || return 1
+    has "message" "$out" "several cameras: choose one with --camera" || return 1
+    has "list" "$out" "GENERIC0002" || return 1
+    "$BIN" get brightness > /dev/null 2>&1; rc=$?
+    expect "get needs the choice too" "$rc" 2 || return 1
+    # two known cameras: also a choice
+    BRIOCTL_FAKE=$PWD/camera.snap:$PWD/brio500.snap
+    "$BIN" > /dev/null 2>&1; rc=$?
+    expect "two known cameras" "$rc" 2 || return 1
+    BRIOCTL_FAKE=:
+    out=$("$BIN" 2>&1); rc=$?
+    expect "no camera status" "$rc" 1 || return 1
+    has "no camera message" "$out" "no UVC camera found"
+}
+
+t_camera_option() {
+    three_cameras
+    for id in 1 GENERIC0001 0x100000 0X100000; do
+        expect "--camera $id" "$(which_camera --camera "$id")" "device 1234 5678" || return 1
+    done
+    expect "by index" "$(which_camera --camera 2)" "device 046d 0944" || return 1
+    expect "by serial" "$(which_camera --camera BRIOSERIAL1)" "device 046d 0944" || return 1
+    expect "serial in any case" "$(which_camera --camera briOserial1)" "device 046d 0944" || return 1
+    expect "by location" "$(which_camera --camera 0x200000)" "device 046d 0944" || return 1
+    expect "--camera=ID" "$(which_camera --camera=0x300000)" "device 1234 5678" || return 1
+    # the option can stand after the command too, and every command takes it
+    expect "after the command" "$("$BIN" snapshot --camera 2 2>&1 | grep '^device')" "device 046d 0944" || return 1
+    expect "get" "$("$BIN" --camera 2 get zoom)" 115 || return 1
+    "$BIN" --camera 2 zoom 130 > /dev/null || return 1
+    expect "set went to camera 2" "$("$BIN" --camera 2 get zoom)" 130 || return 1
+    expect "and not to camera 1" "$("$BIN" --camera 1 get zoom)" 115 || return 1
+    "$BIN" --camera 2 save "$PWD/s" > /dev/null || return 1
+    has "save" "$(cat s)" "zoom 130" || return 1
+    printf 'zoom 140\n' > z
+    "$BIN" --camera 1 apply "$PWD/z" > /dev/null || return 1
+    expect "apply to camera 1" "$("$BIN" --camera 1 get zoom)" 140 || return 1
+    expect "camera 2 untouched" "$("$BIN" --camera 2 get zoom)" 130 || return 1
+    has "dump" "$("$BIN" --camera 2 dump)" "extension unit 10" || return 1
+    hasnt "dump of the generic camera" "$("$BIN" --camera 1 dump)" "extension unit" || return 1
+    "$BIN" --camera 2 > /dev/null || return 1
+    "$BIN" --camera 2 --json > /dev/null || return 1
+    "$BIN" --camera 2 defaults > /dev/null || return 1
+    # errors
+    out=$("$BIN" --camera 9 2>&1); rc=$?
+    expect "no such index" "$rc" 2 || return 1
+    has "message" "$out" "no camera matches 9" || return 1
+    has "list" "$out" "BRIOSERIAL1" || return 1
+    "$BIN" --camera 0x400000 > /dev/null 2>&1; rc=$?
+    expect "no such location" "$rc" 2 || return 1
+    "$BIN" --camera 0x > /dev/null 2>&1; rc=$?
+    expect "bad location" "$rc" 2 || return 1
+    "$BIN" --camera > /dev/null 2>&1; rc=$?
+    expect "missing id" "$rc" 2 || return 1
+    sed 's/^serial .*/serial BRIOSERIAL1/' generic.snap > dup.snap
+    BRIOCTL_FAKE=$PWD/brio.snap:$PWD/dup.snap
+    out=$("$BIN" --camera BRIOSERIAL1 2>&1); rc=$?
+    expect "same serial twice" "$rc" 2 || return 1
+    has "same serial message" "$out" "matches several cameras"
+}
+
+t_snapshot_device_lines() {
+    "$BIN" snapshot > out.snap || return 1
+    has "device" "$(cat out.snap)" "device 046d 0944" || return 1
+    has "name" "$(cat out.snap)" "name MX Brio" || return 1
+    has "serial is masked" "$(cat out.snap)" "serial 000000000000" || return 1
+    sed 's/^serial .*/serial REALSERIAL1/;s/^name .*/name Some Camera Name/;s/^device .*/device 1234 abcd/' camera.snap > other.snap
+    out=$(BRIOCTL_FAKE=$PWD/other.snap "$BIN" snapshot) || return 1
+    has "other device" "$out" "device 1234 abcd" || return 1
+    has "name with spaces" "$out" "name Some Camera Name" || return 1
+    has "same length mask" "$out" "serial 00000000000" || return 1
+    hasnt "real serial" "$out" REALSERIAL1 || return 1
+    # a snapshot from before 1.1 has none of these lines: it is an MX Brio
+    grep -v '^\(device\|name\|serial\) ' camera.snap > old.snap
+    out=$(BRIOCTL_FAKE=$PWD/old.snap "$BIN" list) || return 1
+    matches "old snapshot" "$out" '^1 +046d:0944 +MX Brio +MX Brio +full +- +0x100000$' || return 1
+    out=$(BRIOCTL_FAKE=$PWD/old.snap "$BIN" snapshot) || return 1
+    has "old snapshot gets a device line" "$out" "device 046d 0944" || return 1
+    has "and a name" "$out" "name MX Brio" || return 1
+    BRIOCTL_FAKE=$PWD/old.snap "$BIN" zoom 130 > /dev/null || return 1
+    hasnt "the file stays as it was" "$(cat old.snap)" "device" || return 1
+    printf 'device 046d\n' > bad.snap
+    BRIOCTL_FAKE=$PWD/bad.snap "$BIN" list > /dev/null 2>&1; rc=$?
+    expect "bad device line" "$rc" 1
+}
+
+t_camera_survives_writes() {
+    three_cameras
+    "$BIN" --camera 1 brightness 100 > /dev/null || return 1
+    has "device line kept" "$(cat g1.snap)" "device 1234 5678" || return 1
+    has "name kept" "$(cat g1.snap)" "name Generic UVC" || return 1
+    has "serial kept" "$(cat g1.snap)" "serial GENERIC0001" || return 1
+    expect "listed the same" "$("$BIN" list --json | grep -c GENERIC0001)" 1
+}
+
 # --- run -----------------------------------------------------------------------------------------------------------
 
 N=0
@@ -475,7 +622,8 @@ FAILED=0
 run() {  # run NAME FUNCTION
     N=$((N + 1))
     dir=$ROOT/$N
-    if ! { mkdir -p "$dir/home" && cp "$FIXTURE" "$dir/camera.snap"; }; then
+    if ! { mkdir -p "$dir/home" && cp "$FIXTURE" "$dir/camera.snap" && cp "$GENERIC" "$dir/generic.snap" &&
+        cp "$EXTRA" "$dir/extra.snap" && cp "$BRIO500" "$dir/brio500.snap"; }; then
         echo "not ok $N - $1 (cannot set up)"
         FAILED=$((FAILED + 1))
         return
@@ -532,6 +680,11 @@ run "watch connect: only real changes are printed" t_reapply_prints_only_changes
 run "watch video start: mic is left alone" t_reapply_never_changes_mic_in_video
 run "watch at the desk: fov, zoom, pan, tilt are skipped" t_reapply_skips_framing_at_the_desk
 run "watch video start after unplugging does nothing" t_video_start_after_unplug
+run "list shows every camera, as a table and as JSON" t_list
+run "without --camera: the only camera, or the only known one, else exit 2" t_default_camera
+run "--camera takes an index, a serial number or a location, for every command" t_camera_option
+run "snapshot writes the device, name and masked serial; old snapshots are MX Brios" t_snapshot_device_lines
+run "writes keep the device lines of a fake camera" t_camera_survives_writes
 
 echo "1..$N"
 if [ "$FAILED" -ne 0 ]; then

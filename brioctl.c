@@ -14,14 +14,16 @@
 #include <unistd.h>
 #include <CoreAudio/CoreAudio.h>
 #include <CoreFoundation/CoreFoundation.h>
+#include <CoreMediaIO/CMIOHardware.h>
+#include <dispatch/dispatch.h>
 #include <IOKit/IOKitLib.h>
 #include <IOKit/IOCFPlugIn.h>
 #include <IOKit/hid/IOHIDManager.h>
 #include <IOKit/hid/IOHIDKeys.h>
 #include <IOKit/usb/IOUSBLib.h>
 
-#define VID 0x046d
-#define PID 0x0944  // MX Brio
+#define VID_LOGITECH 0x046d
+#define PID_MXBRIO 0x0944
 #define MIC_NAME "MX Brio"
 #ifndef VERSION
 #define VERSION "dev"  // the Makefile passes the real one
@@ -65,6 +67,33 @@ enum { VC_INPUT_TERMINAL = 0x02, VC_PROCESSING_UNIT = 0x05, VC_EXTENSION_UNIT = 
 enum { U_CT, U_PU, U_VIDEOPIPE, U_PERIPHERAL, U_INFO, U_STATS, U_APP, U_COUNT };
 enum { CT_ZOOM = 0x0b, CT_PANTILT = 0x0d };
 
+// Logitech models whose extension-unit controls brioctl knows. "full" is the camera brioctl was built on and tested
+// with. "experimental" gets only what other projects confirm (cameractrls: field of view on all of them; OpenLogi issue
+// 1222: Show Mode on the Brio 500). Any other camera, Logitech or not, gets the standard UVC controls and nothing else:
+// extension units are never written there. F_HDR: Logi Tune calls the backlight compensation control HDR.
+enum { S_STANDARD, S_EXPERIMENTAL, S_FULL };
+static const char *const SUPPORT[] = {"standard", "experimental", "full"};
+enum { F_FOV = 1, F_SHOW = 2, F_FULL = 4, F_HDR = 8, F_NOHDR = 16 };  // F_NOHDR is derived: the name is backlight
+static const struct { int pid, feat; const char *name; } MODELS[] = {
+    {0x0944, F_FULL | F_FOV | F_SHOW | F_HDR, "MX Brio"},
+    {0x0943, F_FOV | F_SHOW | F_HDR, "Brio 500"},
+    {0x085e, F_FOV | F_HDR, "Brio"},
+    {0x0946, F_FOV, "Brio 501"},
+    {0x0919, F_FOV, "Brio 505"},
+    {0x086b, F_FOV | F_HDR, "Brio 4K Stream Edition"},
+};
+
+#define MAX_CAMS 16
+typedef struct {  // a UVC camera on USB
+    int vid, pid, index;       // index: 1-based, in location order
+    unsigned loc;              // USB location id
+    char name[64], serial[48]; // USB strings
+    const char *model;         // name in MODELS, NULL if unknown
+    int feat, support;         // F_* and S_*
+    int slot;                  // fake: which BRIOCTL_FAKE file
+    io_service_t svc;          // real: the USB device, held until dropCameras
+} CamInfo;
+
 typedef IOUSBDeviceInterface650 **Dev;
 
 typedef struct {
@@ -73,6 +102,9 @@ typedef struct {
     int cfgLen;
     int vcIf;            // VideoControl interface number
     int unit[U_COUNT];   // unit ids by U_*, 0 = absent
+    uint32_t bm[2];      // bmControls of the camera terminal and the processing unit: the standard controls declared
+    CamInfo info;
+    int feat;            // info.feat, plus F_NOHDR
 } Cam;
 
 typedef struct { const char *name; long raw; } Map;  // what the user types and sees <-> register value
@@ -174,8 +206,7 @@ static void guidString(const uint8_t *g, char s[37]) {
 }
 
 // Matching dictionary for a vendor and product id; the key names differ between USB and HID.
-static CFMutableDictionaryRef vidPid(CFMutableDictionaryRef m, CFStringRef vidKey, CFStringRef pidKey) {
-    int vid = VID, pid = PID;
+static CFMutableDictionaryRef vidPid(CFMutableDictionaryRef m, CFStringRef vidKey, CFStringRef pidKey, int vid, int pid) {
     CFNumberRef nv = CFNumberCreate(NULL, kCFNumberIntType, &vid), np = CFNumberCreate(NULL, kCFNumberIntType, &pid);
     CFDictionarySetValue(m, vidKey, nv);
     CFDictionarySetValue(m, pidKey, np);
@@ -184,31 +215,42 @@ static CFMutableDictionaryRef vidPid(CFMutableDictionaryRef m, CFStringRef vidKe
     return m;
 }
 
-static CFMutableDictionaryRef cameraMatching(void) {
-    return vidPid(IOServiceMatching("IOUSBHostDevice"), CFSTR("idVendor"), CFSTR("idProduct"));
-}
-
 // The descriptor at offset i of the configuration descriptor, NULL at the end or if it would run past it. Callers
 // still check d[0] against the fields they read.
 static const uint8_t *descAt(const Cam *c, int i) {
     return i + 2 <= c->cfgLen && c->cfg[i] >= 2 && i + c->cfg[i] <= c->cfgLen ? c->cfg + i : NULL;
 }
 
-// Walk the configuration descriptor in c->cfg: the VideoControl interface and the unit ids.
+// A bmControls bitmap of up to 4 bytes at d + at, bSize bytes long (0 if the descriptor is too short for it).
+static uint32_t bitmap(const uint8_t *d, int at, int size) {
+    uint32_t bm = 0;
+    if (at + size > d[0]) return 0;
+    for (int i = 0; i < size && i < 4; i++) bm |= (uint32_t)d[at + i] << (8 * i);
+    return bm;
+}
+
+// Walk the configuration descriptor in c->cfg: the first VideoControl interface, its unit ids and the standard controls
+// the camera terminal and the processing unit declare.
 static int parseConfig(Cam *c) {
     c->vcIf = -1;
     memset(c->unit, 0, sizeof c->unit);
-    int cls = 0, sub = 0;
+    memset(c->bm, 0, sizeof c->bm);
+    int cls = 0, sub = 0, inVC = 0;
     const uint8_t *d;
     for (int i = 0; (d = descAt(c, i)); i += d[0]) {
         if (d[1] == DESC_INTERFACE && d[0] >= 7) {
             cls = d[5];
             sub = d[6];
-            if (cls == 0x0e && sub == 1) c->vcIf = d[2];
-        } else if (d[1] == DESC_CS_INTERFACE && d[0] >= 4 && cls == 0x0e && sub == 1) {
-            if (d[2] == VC_INPUT_TERMINAL && d[0] >= 6 && (d[4] | d[5] << 8) == ITT_CAMERA) c->unit[U_CT] = d[3];
-            else if (d[2] == VC_PROCESSING_UNIT) c->unit[U_PU] = d[3];
-            else if (d[2] == VC_EXTENSION_UNIT && d[0] >= 20) {
+            inVC = cls == 0x0e && sub == 1 && (c->vcIf < 0 || c->vcIf == d[2]);
+            if (inVC) c->vcIf = d[2];
+        } else if (d[1] == DESC_CS_INTERFACE && d[0] >= 4 && inVC) {
+            if (d[2] == VC_INPUT_TERMINAL && d[0] >= 6 && (d[4] | d[5] << 8) == ITT_CAMERA && !c->unit[U_CT]) {
+                c->unit[U_CT] = d[3];
+                if (d[0] >= 15) c->bm[0] = bitmap(d, 15, d[14]);
+            } else if (d[2] == VC_PROCESSING_UNIT && d[0] >= 8 && !c->unit[U_PU]) {
+                c->unit[U_PU] = d[3];
+                c->bm[1] = bitmap(d, 8, d[7]);
+            } else if (d[2] == VC_EXTENSION_UNIT && d[0] >= 20) {
                 char g[37];
                 guidString(d + 4, g);
                 if (!strcmp(g, GUID_VIDEOPIPE)) c->unit[U_VIDEOPIPE] = d[3];
@@ -223,17 +265,28 @@ static int parseConfig(Cam *c) {
     return 0;
 }
 
-// Transport: request, cameraPresent, openCam, closeCam and micGain are the only functions that touch hardware.
+static CamInfo target;  // the camera every command talks to, chosen by selectCamera (watch: by itself)
+
+static void usbString(io_service_t s, CFStringRef key, char *out, size_t n) {
+    CFTypeRef v = IORegistryEntryCreateCFProperty(s, key, NULL, 0);
+    out[0] = 0;
+    if (v && CFGetTypeID(v) == CFStringGetTypeID()) CFStringGetCString(v, out, n, kCFStringEncodingUTF8);
+    if (v) CFRelease(v);
+}
+
+// Transport: request, scanCameras, attach, cameraPresent, closeCam and micGain are the only functions that touch
+// hardware.
 #ifdef BRIOCTL_FAKE
 // A camera read from a snapshot file (brioctl snapshot) so the tests run without hardware. SET_CUR stores the value
-// and closeCam writes the file back, so separate brioctl processes see each other's writes.
+// and closeCam writes the file back, so separate brioctl processes see each other's writes. BRIOCTL_FAKE may name
+// several snapshots separated by ':': several cameras, at USB locations 0x100000, 0x200000, ...
 #define FAKE_REGS 128
 
 static struct {
     Reg reg[FAKE_REGS];
-    int nreg, dirty, hasMic;
+    int nreg, dirty, hasMic, hasDevice, vid, pid;
     Float32 mic;
-    char path[PATH_MAX], head[256];
+    char path[PATH_MAX], head[256], name[64], serial[48];
     uint8_t *desc;
     int descLen;
 } fk;
@@ -267,9 +320,22 @@ static int fakeLine(char *line) {
         if (!fk.head[0]) snprintf(fk.head, sizeof fk.head, "%.*s", (int)strcspn(line, "\r\n"), line);
         return 0;
     }
+    if (!strncmp(line, "name ", 5)) {  // the rest of the line, spaces included
+        snprintf(fk.name, sizeof fk.name, "%.*s", (int)strcspn(line + 5, "\r\n"), line + 5);
+        return 0;
+    }
     char *save, *tok = strtok_r(line, " \t\r\n", &save), *a = tok ? NEXT : NULL;
     if (!tok) return 0;
-    if (!strcmp(tok, "micgain") && a) {
+    if (!strcmp(tok, "device") && a) {
+        char *pid = NEXT, *e1, *e2;
+        if (!pid) return -1;
+        fk.vid = (int)strtol(a, &e1, 16);
+        fk.pid = (int)strtol(pid, &e2, 16);
+        if (*e1 || *e2) return -1;
+        fk.hasDevice = 1;
+    } else if (!strcmp(tok, "serial") && a) {
+        snprintf(fk.serial, sizeof fk.serial, "%s", a);
+    } else if (!strcmp(tok, "micgain") && a) {
         fk.hasMic = 1;
         fk.mic = strtof(a, NULL);
     } else if (!strcmp(tok, "descriptor") && a) {
@@ -295,9 +361,7 @@ static int fakeLine(char *line) {
 }
 #undef NEXT
 
-static int fakeLoad(void) {
-    const char *path = getenv("BRIOCTL_FAKE");
-    if (!path || !*path) { fprintf(stderr, "BRIOCTL_FAKE is not set (path of a brioctl snapshot)\n"); return -1; }
+static int fakeLoad(const char *path) {
     free(fk.desc);
     memset(&fk, 0, sizeof fk);
     snprintf(fk.path, sizeof fk.path, "%s", path);
@@ -314,7 +378,41 @@ static int fakeLoad(void) {
     }
     free(line);
     fclose(f);
+    if (!rc && !fk.hasDevice) {  // a snapshot from before 1.1 has no device line: it is an MX Brio
+        fk.vid = VID_LOGITECH;
+        fk.pid = PID_MXBRIO;
+        if (!fk.name[0]) snprintf(fk.name, sizeof fk.name, "MX Brio");
+    }
     return rc;
+}
+
+// The snapshot paths in BRIOCTL_FAKE; -1 if it is not set.
+static int fakePaths(char paths[][PATH_MAX], int max) {
+    const char *env = getenv("BRIOCTL_FAKE");
+    if (!env || !*env) { fprintf(stderr, "BRIOCTL_FAKE is not set (path of a brioctl snapshot)\n"); return -1; }
+    int n = 0;
+    while (*env && n < max) {
+        size_t len = strcspn(env, ":");
+        if (len) snprintf(paths[n++], PATH_MAX, "%.*s", (int)len, env);
+        env += len + (env[len] ? 1 : 0);
+    }
+    return n;
+}
+
+static int scanCameras(CamInfo *l, int max) {
+    static char paths[MAX_CAMS][PATH_MAX];
+    int n = fakePaths(paths, max < MAX_CAMS ? max : MAX_CAMS);
+    for (int i = 0; i < n; i++) {
+        if (fakeLoad(paths[i])) return -1;
+        memset(&l[i], 0, sizeof l[i]);
+        l[i].vid = fk.vid;
+        l[i].pid = fk.pid;
+        l[i].loc = (unsigned)(i + 1) << 20;
+        l[i].slot = i;
+        snprintf(l[i].name, sizeof l[i].name, "%s", fk.name);
+        snprintf(l[i].serial, sizeof l[i].serial, "%s", fk.serial);
+    }
+    return n;
 }
 
 static int fakeSave(void) {
@@ -323,6 +421,9 @@ static int fakeSave(void) {
     FILE *f = fopen(tmp, "w");
     if (!f) { perror(tmp); return -1; }
     fprintf(f, "%s\n", fk.head[0] ? fk.head : "# brioctl snapshot 1");
+    if (fk.hasDevice) fprintf(f, "device %04x %04x\n", fk.vid, fk.pid);
+    if (fk.name[0] && fk.hasDevice) fprintf(f, "name %s\n", fk.name);
+    if (fk.serial[0]) fprintf(f, "serial %s\n", fk.serial);
     if (fk.descLen) {
         fprintf(f, "descriptor ");
         hex(f, fk.desc, fk.descLen);
@@ -381,12 +482,13 @@ static int cameraPresent(void) {  // BRIOCTL_FAKE_ABSENT: the camera is unplugge
     return !(absent && *absent);
 }
 
-static int openCam(Cam *c) {
-    memset(c, 0, sizeof *c);
-    if (fakeLoad()) return -1;
+static int attach(Cam *c, const CamInfo *ci) {
+    static char paths[MAX_CAMS][PATH_MAX];
+    int n = fakePaths(paths, MAX_CAMS);
+    if (n < 0 || ci->slot >= n || fakeLoad(paths[ci->slot])) return -1;
     c->cfg = fk.desc;
     c->cfgLen = fk.descLen;
-    return parseConfig(c);
+    return 0;
 }
 
 // Returns -1 if the fake camera could not be written back.
@@ -418,28 +520,58 @@ static IOReturn request(Cam *c, int req, int unit, int sel, void *buf, int len, 
     return kr;
 }
 
-static int cameraPresent(void) {
-    io_service_t svc = IOServiceGetMatchingService(kIOMainPortDefault, cameraMatching());
-    if (svc) IOObjectRelease(svc);
-    return svc != 0;
-}
-
 static int closeCam(Cam *c) {
     if (c->dev) (*c->dev)->Release(c->dev);
     c->dev = NULL;
     return 0;
 }
 
-static int openCam(Cam *c) {
-    memset(c, 0, sizeof *c);
-    io_service_t svc = IOServiceGetMatchingService(kIOMainPortDefault, cameraMatching());
-    if (!svc) { fprintf(stderr, "MX Brio is not connected\n"); return -1; }
+static int usbNumber(io_service_t s, CFStringRef key) {
+    CFTypeRef v = IORegistryEntryCreateCFProperty(s, key, NULL, 0);
+    int n = 0;
+    if (v && CFGetTypeID(v) == CFNumberGetTypeID()) CFNumberGetValue(v, kCFNumberIntType, &n);
+    if (v) CFRelease(v);
+    return n;
+}
 
+// Every USB device with a VideoControl interface (class 0x0e, subclass 1), one entry per device.
+static int scanCameras(CamInfo *l, int max) {
+    int n = 0, cls = 0x0e, sub = 1;
+    CFMutableDictionaryRef m = IOServiceMatching("IOUSBHostInterface");
+    CFNumberRef nc = CFNumberCreate(NULL, kCFNumberIntType, &cls), ns = CFNumberCreate(NULL, kCFNumberIntType, &sub);
+    CFDictionarySetValue(m, CFSTR("bInterfaceClass"), nc);
+    CFDictionarySetValue(m, CFSTR("bInterfaceSubClass"), ns);
+    CFRelease(nc);
+    CFRelease(ns);
+    io_iterator_t it;
+    if (IOServiceGetMatchingServices(kIOMainPortDefault, m, &it)) return 0;
+    for (io_service_t ifc; (ifc = IOIteratorNext(it)); IOObjectRelease(ifc)) {
+        io_service_t dev;
+        if (IORegistryEntryGetParentEntry(ifc, kIOServicePlane, &dev)) continue;
+        unsigned loc = (unsigned)usbNumber(dev, CFSTR("locationID"));
+        int seen = 0;
+        for (int i = 0; i < n; i++) seen |= l[i].loc == loc;
+        if (seen || n == max || !IOObjectConformsTo(dev, "IOUSBHostDevice")) {
+            IOObjectRelease(dev);
+            continue;
+        }
+        memset(&l[n], 0, sizeof l[n]);
+        l[n].vid = usbNumber(dev, CFSTR("idVendor"));
+        l[n].pid = usbNumber(dev, CFSTR("idProduct"));
+        l[n].loc = loc;
+        usbString(dev, CFSTR("USB Product Name"), l[n].name, sizeof l[n].name);
+        usbString(dev, CFSTR("USB Serial Number"), l[n].serial, sizeof l[n].serial);
+        l[n++].svc = dev;
+    }
+    IOObjectRelease(it);
+    return n;
+}
+
+static int attach(Cam *c, const CamInfo *ci) {
     IOCFPlugInInterface **plug;
     SInt32 score;
-    kern_return_t kr = IOCreatePlugInInterfaceForService(svc, kIOUSBDeviceUserClientTypeID, kIOCFPlugInInterfaceID,
+    kern_return_t kr = IOCreatePlugInInterfaceForService(ci->svc, kIOUSBDeviceUserClientTypeID, kIOCFPlugInInterfaceID,
                                                          &plug, &score);
-    IOObjectRelease(svc);
     if (kr) { fprintf(stderr, "cannot attach to the camera: 0x%x\n", kr); return -1; }
     (*plug)->QueryInterface(plug, CFUUIDGetUUIDBytes(kIOUSBDeviceInterfaceID650), (LPVOID *)&c->dev);
     (*plug)->Release(plug);
@@ -453,10 +585,6 @@ static int openCam(Cam *c) {
     }
     c->cfg = (const uint8_t *)cfg;
     c->cfgLen = USBToHostWord(cfg->wTotalLength);
-    if (parseConfig(c)) {
-        closeCam(c);
-        return -1;
-    }
     return 0;
 }
 
@@ -495,6 +623,143 @@ static int micGain(Float32 *get, const Float32 *set) {
     return AudioObjectGetPropertyData(mic, &a, 0, NULL, &n, get) ? -1 : 0;
 }
 #endif
+
+// --- cameras: the list, the choice and opening the one chosen -------------------------------------------------------
+
+static void describe(CamInfo *ci) {
+    ci->model = NULL;
+    ci->feat = 0;
+    for (size_t i = 0; i < sizeof MODELS / sizeof *MODELS; i++)
+        if (ci->vid == VID_LOGITECH && ci->pid == MODELS[i].pid) {
+            ci->model = MODELS[i].name;
+            ci->feat = MODELS[i].feat;
+        }
+    ci->support = ci->feat & F_FULL ? S_FULL : ci->feat ? S_EXPERIMENTAL : S_STANDARD;
+}
+
+static int byLocation(const void *a, const void *b) {
+    unsigned x = ((const CamInfo *)a)->loc, y = ((const CamInfo *)b)->loc;
+    return x < y ? -1 : x > y;
+}
+
+// All cameras in location order, with their 1-based index and model; -1 if the list cannot be made (said on stderr).
+static int listCameras(CamInfo *l, int max) {
+    int n = scanCameras(l, max);
+    if (n < 0) return -1;
+    qsort(l, n, sizeof *l, byLocation);
+    for (int i = 0; i < n; i++) {
+        l[i].index = i + 1;
+        describe(&l[i]);
+    }
+    return n;
+}
+
+static void dropCameras(CamInfo *l, int n) {
+    for (int i = 0; i < n; i++)
+        if (l[i].svc) IOObjectRelease(l[i].svc);
+}
+
+// The camera in l that is the target: same ids and serial, and the same location if there is a choice. -1 if it is gone.
+static int findTarget(const CamInfo *l, int n) {
+    int best = -1;
+    for (int i = 0; i < n; i++) {
+        if (l[i].vid != target.vid || l[i].pid != target.pid) continue;
+        if (target.serial[0] && strcmp(l[i].serial, target.serial)) continue;
+        if (l[i].loc == target.loc) return i;
+        if (best < 0) best = i;
+    }
+    return best;
+}
+
+static const char *camName(const CamInfo *ci) {
+    return ci->model ? ci->model : ci->name[0] ? ci->name : "UVC camera";
+}
+
+#ifndef BRIOCTL_FAKE
+static int cameraPresent(void) {
+    CamInfo l[MAX_CAMS];
+    int n = listCameras(l, MAX_CAMS), found = n > 0 && findTarget(l, n) >= 0;
+    dropCameras(l, n);
+    return found;
+}
+#endif
+
+static int openCam(Cam *c) {
+    memset(c, 0, sizeof *c);
+    CamInfo l[MAX_CAMS];
+    int n = listCameras(l, MAX_CAMS), i = n > 0 ? findTarget(l, n) : -1, rc = -1;
+    if (i >= 0) {
+        if (!attach(c, &l[i])) {
+            c->info = l[i];
+            c->info.svc = 0;
+            c->feat = l[i].feat | (l[i].feat & F_HDR ? 0 : F_NOHDR);
+            if ((rc = parseConfig(c))) closeCam(c);
+        }
+    } else if (n >= 0) fprintf(stderr, "%s is not connected\n", camName(&target));
+    dropCameras(l, n);
+    return rc;
+}
+
+static void printCameras(FILE *f, const CamInfo *l, int n) {
+    fprintf(f, "%-3s %-10s %-24s %-24s %-13s %-14s %s\n", "#", "id", "name", "model", "support", "serial", "location");
+    for (int i = 0; i < n; i++)
+        fprintf(f, "%-3d %04x:%04x  %-24s %-24s %-13s %-14s 0x%x\n", l[i].index, l[i].vid, l[i].pid, l[i].name,
+                l[i].model ? l[i].model : "-", SUPPORT[l[i].support], l[i].serial[0] ? l[i].serial : "-", l[i].loc);
+}
+
+static int allDigits(const char *s) { return *s && strspn(s, "0123456789") == strlen(s); }
+
+// Which camera does the user mean? ID is an index, a location (0x...) or a serial number; without ID: the only camera,
+// or the only one brioctl knows (full or experimental support). Returns 0 and the position in *pick, or the exit code
+// after saying why not.
+static int chooseCamera(const CamInfo *l, int n, const char *id, int *pick) {
+    *pick = -1;
+    if (!n) {
+        fprintf(stderr, "no UVC camera found\n");
+        return 1;
+    }
+    if (id) {
+        int found = 0;
+        if (!strncmp(id, "0x", 2) || !strncmp(id, "0X", 2)) {
+            char *end;
+            unsigned long loc = strtoul(id, &end, 16);
+            for (int i = 0; i < n; i++)
+                if (!*end && end > id + 2 && l[i].loc == loc) *pick = i, found = 1;
+        } else if (allDigits(id) && strlen(id) < 4 && atoi(id) >= 1 && atoi(id) <= n) {
+            *pick = atoi(id) - 1;
+            found = 1;
+        } else
+            for (int i = 0; i < n; i++)
+                if (l[i].serial[0] && !strcasecmp(l[i].serial, id)) found++, *pick = i;
+        if (found == 1) return 0;
+        fprintf(stderr, found ? "serial %s matches several cameras: use the index or the location\n"
+                              : "no camera matches %s (an index, a serial number or a location like 0x110000)\n", id);
+        printCameras(stderr, l, n);
+        return 2;
+    }
+    int known = 0;
+    for (int i = 0; i < n; i++)
+        if (l[i].support != S_STANDARD) known++, *pick = i;
+    if (n == 1) *pick = 0;
+    else if (known != 1) {
+        fprintf(stderr, "several cameras: choose one with --camera\n");
+        printCameras(stderr, l, n);
+        return 2;
+    }
+    return 0;
+}
+
+// Choose the camera for this run and remember it in target; the exit code if there is none.
+static int selectCamera(const char *id) {
+    CamInfo l[MAX_CAMS];
+    int n = listCameras(l, MAX_CAMS), pick, rc = 1;
+    if (n >= 0 && !(rc = chooseCamera(l, n, id, &pick))) {
+        target = l[pick];
+        target.svc = 0;
+    }
+    dropCameras(l, n);
+    return rc;
+}
 
 static long getLE(const uint8_t *b, int n, int sgn) {
     unsigned long v = 0;
@@ -708,11 +973,24 @@ static int show(Cam *c) {
 static void jstr(const char *s) {
     if (!s) { printf("null"); return; }
     putchar('"');
-    for (; *s; s++) {
+    while (*s) {
         unsigned char ch = *s;
-        if (ch == '"' || ch == '\\') printf("\\%c", ch);
-        else if (ch < 0x20 || ch >= 0x7f) printf("\\u%04x", ch);
-        else putchar(ch);
+        int len = ch >= 0xf0 ? 4 : ch >= 0xe0 ? 3 : ch >= 0xc0 ? 2 : 1;
+        if (ch == '"' || ch == '\\') printf("\\%c", ch), s++;
+        else if (ch < 0x20 || ch == 0x7f) printf("\\u%04x", ch), s++;
+        else if (ch < 0x80) putchar(ch), s++;
+        else {  // UTF-8 (USB strings): a valid sequence becomes \uXXXX, anything else U+FFFD
+            unsigned cp = len == 4 ? ch & 7 : len == 3 ? ch & 15 : len == 2 ? ch & 31 : 0xfffd;
+            int ok = len > 1;
+            for (int i = 1; i < len && ok; i++) {
+                ok = (s[i] & 0xc0) == 0x80;
+                cp = cp << 6 | (s[i] & 63);
+            }
+            if (!ok || cp > 0x10ffff || (cp >= 0xd800 && cp < 0xe000)) cp = 0xfffd, len = ok ? len : 1;
+            if (cp > 0xffff) printf("\\u%04x\\u%04x", 0xd800 + ((cp - 0x10000) >> 10), 0xdc00 + ((cp - 0x10000) & 0x3ff));
+            else printf("\\u%04x", cp);
+            s += len;
+        }
     }
     putchar('"');
 }
@@ -723,6 +1001,32 @@ static void jint(int v) {
 }
 
 static void jbool(int v) { printf(v < 0 ? "null" : v ? "true" : "false"); }
+
+// list: the cameras brioctl can talk to, as a table or as JSON.
+static int listCmd(int json) {
+    CamInfo l[MAX_CAMS];
+    int n = listCameras(l, MAX_CAMS);
+    if (n < 0) return 1;
+    if (!json) {
+        if (n) printCameras(stdout, l, n);
+        else printf("no UVC camera found\n");
+    } else {
+        printf("{\"cameras\":[");
+        for (int i = 0; i < n; i++) {
+            printf("%s{\"index\":%d,\"vid\":\"%04x\",\"pid\":\"%04x\",\"name\":", i ? "," : "", l[i].index, l[i].vid,
+                   l[i].pid);
+            jstr(l[i].name[0] ? l[i].name : NULL);
+            printf(",\"model\":");
+            jstr(l[i].model);
+            printf(",\"support\":\"%s\",\"serial\":", SUPPORT[l[i].support]);
+            jstr(l[i].serial[0] ? l[i].serial : NULL);
+            printf(",\"location\":\"0x%x\"}", l[i].loc);
+        }
+        printf("]}\n");
+    }
+    dropCameras(l, n);
+    return 0;
+}
 
 // A control's value as JSON: named values are strings, plain numbers stay numbers.
 static void jvalue(const Ctrl *k, const char *s) {
@@ -993,21 +1297,57 @@ static int apply(Cam *c, const char *name) {
     return rc;
 }
 
-static int profiles(void) {
-    printf("built-in presets (from Logi Options+; colorboost is the firmware's Color Boost):\n");
-    for (int i = 0; i < NPRESETS; i++) {
-        printf("  %-10s ", PRESETS[i].name);
-        for (const char *p = PRESETS[i].settings; *p; p++)
-            if (*p != '\n') putchar(*p);
-            else printf(p[1] ? ", " : "\n");
-    }
-    char dir[PATH_MAX];
-    configPath("", dir, sizeof dir);
-    printf("\nsaved in %s:\n", dir);
+static int byName(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
+
+// The files in the settings directory (not the dot files), sorted. Returns the count; free each name.
+static int savedFiles(const char *dir, char **names, int max) {
+    int n = 0;
     DIR *d = opendir(dir);
-    for (struct dirent *e; d && (e = readdir(d));)
-        if (e->d_name[0] != '.') printf("  %s\n", e->d_name);
+    for (struct dirent *e; d && n < max && (e = readdir(d));)
+        if (e->d_name[0] != '.' && (names[n] = strdup(e->d_name))) n++;
     if (d) closedir(d);
+    qsort(names, n, sizeof *names, byName);
+    return n;
+}
+
+static int profiles(int json) {
+    char dir[PATH_MAX], *names[512];
+    configPath("", dir, sizeof dir);
+    int n = savedFiles(dir, names, 512);
+    if (json) {
+        dir[strlen(dir) - 1] = 0;  // no trailing slash
+        printf("{\"presets\":[");
+        for (int i = 0; i < NPRESETS; i++) {
+            printf("%s{\"name\":\"%s\",\"settings\":{", i ? "," : "", PRESETS[i].name);
+            char nm[64], val[64];
+            int off = 0, used = 0, first = 1;
+            while (sscanf(PRESETS[i].settings + off, "%63s %63s%n", nm, val, &used) == 2) {
+                printf("%s\"%s\":\"%s\"", first ? "" : ",", nm, val);
+                first = 0;
+                off += used;
+            }
+            printf("}}");
+        }
+        printf("],\"saved\":[");
+        for (int i = 0; i < n; i++) {
+            if (i) putchar(',');
+            jstr(names[i]);
+        }
+        printf("],\"dir\":");
+        jstr(dir);
+        printf("}\n");
+    } else {
+        printf("built-in presets (from Logi Options+; colorboost is the firmware's Color Boost):\n");
+        for (int i = 0; i < NPRESETS; i++) {
+            printf("  %-10s ", PRESETS[i].name);
+            for (const char *p = PRESETS[i].settings; *p; p++)
+                if (*p != '\n') putchar(*p);
+                else printf(p[1] ? ", " : "\n");
+        }
+        printf("\nsaved in %s:\n", dir);
+        for (int i = 0; i < n; i++) printf("  %s\n", names[i]);
+    }
+    for (int i = 0; i < n; i++) free(names[i]);
     return 0;
 }
 
@@ -1049,13 +1389,22 @@ static void reapply(int attempts, int waitFirst, int video) {
     printf("could not apply all settings (%d changed)\n", written);
 }
 
+// USB devices with the target's vendor and product id; the target's serial number is checked when one arrives.
+static CFMutableDictionaryRef cameraMatching(void) {
+    return vidPid(IOServiceMatching("IOUSBHostDevice"), CFSTR("idVendor"), CFSTR("idProduct"), target.vid, target.pid);
+}
+
 static void cameraArrived(void *refcon, io_iterator_t it) {
     (void)refcon;
     int arrived = 0;
-    for (io_service_t s; (s = IOIteratorNext(it)); IOObjectRelease(s)) arrived = 1;
+    for (io_service_t s; (s = IOIteratorNext(it)); IOObjectRelease(s)) {
+        char serial[48];
+        usbString(s, CFSTR("USB Serial Number"), serial, sizeof serial);
+        if (!target.serial[0] || !strcmp(serial, target.serial)) arrived = 1;
+    }
     if (!arrived) return;
     stamp();
-    printf("MX Brio connected, applying %s\n", watchPath);
+    printf("%s connected, applying %s\n", camName(&target), watchPath);
     reapply(5, 1, 0);
 }
 
@@ -1122,7 +1471,8 @@ static void watchVideo(void) {
     IOHIDManagerRef mgr = IOHIDManagerCreate(kCFAllocatorDefault, kIOHIDOptionsTypeNone);
     CFMutableDictionaryRef m =
         CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-    IOHIDManagerSetDeviceMatching(mgr, vidPid(m, CFSTR(kIOHIDVendorIDKey), CFSTR(kIOHIDProductIDKey)));
+    IOHIDManagerSetDeviceMatching(
+        mgr, vidPid(m, CFSTR(kIOHIDVendorIDKey), CFSTR(kIOHIDProductIDKey), target.vid, target.pid));
     CFRelease(m);
     IOHIDManagerRegisterDeviceMatchingCallback(mgr, hidAdded, NULL);
     IOHIDManagerRegisterDeviceRemovalCallback(mgr, hidRemoved, NULL);
@@ -1136,11 +1486,39 @@ static void watchVideo(void) {
     CFRelease(mgr);
 }
 
+// Which camera watch follows. Like the other commands, but without --camera it never settles for a camera brioctl does
+// not know: a LaunchAgent started with the MX Brio unplugged must not apply its settings to a FaceTime camera. With no
+// Logitech camera connected it waits for the MX Brio, as 1.0 did.
+static int watchTarget(const char *camId) {
+    CamInfo l[MAX_CAMS];
+    int n = listCameras(l, MAX_CAMS), pick = -1, known = 0, rc = 0;
+    if (n < 0) return 1;
+    for (int i = 0; i < n; i++)
+        if (l[i].support != S_STANDARD) known++, pick = i;
+    if (!camId && !known) {
+        memset(&target, 0, sizeof target);
+        target.vid = VID_LOGITECH;
+        target.pid = PID_MXBRIO;
+        describe(&target);
+        if (n) {
+            stamp();
+            printf("no camera known to brioctl is connected, waiting for the MX Brio (--camera ID watches another)\n");
+        }
+    } else if (!(rc = chooseCamera(l, n, camId, &pick))) {
+        target = l[pick];
+        target.svc = 0;
+    }
+    dropCameras(l, n);
+    return rc;
+}
+
 // Apply a settings file now, every time the camera is connected again and whenever video starts (run it from a
 // LaunchAgent).
-static int watch(const char *name) {
+static int watch(const char *name, const char *camId) {
     configPath(name, watchPath, sizeof watchPath);
     setvbuf(stdout, NULL, _IOLBF, 0);
+    int rc = watchTarget(camId);
+    if (rc) return rc;
     IONotificationPortRef port = IONotificationPortCreate(kIOMainPortDefault);
     CFRunLoopAddSource(CFRunLoopGetCurrent(), IONotificationPortGetRunLoopSource(port), kCFRunLoopDefaultMode);
     io_iterator_t it;
@@ -1149,14 +1527,18 @@ static int watch(const char *name) {
         return 1;
     }
     stamp();
-    printf("watching for MX Brio, settings %s\n", watchPath);
-    watchVideo();
+    printf("watching for %s, settings %s\n", camName(&target), watchPath);
+    if (target.vid == VID_LOGITECH && target.pid == PID_MXBRIO) watchVideo();  // only it sends the HID report
     cameraArrived(NULL, it);  // the camera may already be connected; this also arms the notification
     CFRunLoopRun();
     return 0;
 }
 
 static int factoryReset(Cam *c, int yes) {
+    if (!(c->feat & F_FULL)) {
+        fprintf(stderr, "factory-reset is only for the MX Brio\n");
+        return 1;
+    }
     if (!yes) {
         fprintf(stderr, "factory-reset restores the camera's own defaults and restarts it.\n"
                         "Current settings are saved to ~/.config/brioctl/before-reset and applied again afterwards.\n"
@@ -1337,7 +1719,14 @@ static int snapshot(Cam *c, const char *path) {
     time_t t = time(NULL);
     readFirmware(c, fw);
     strftime(ts, sizeof ts, "%Y-%m-%d %H:%M", localtime(&t));
-    fprintf(f, "# brioctl snapshot 1, firmware %s, %s\ndescriptor ", fw, ts);
+    fprintf(f, "# brioctl snapshot 1, firmware %s, %s\ndevice %04x %04x\n", fw, ts, c->info.vid, c->info.pid);
+    if (c->info.name[0]) fprintf(f, "name %s\n", c->info.name);
+    if (c->info.serial[0]) {  // masked like the serial register
+        fprintf(f, "serial ");
+        for (const char *p = c->info.serial; *p; p++) fputc('0', f);
+        fprintf(f, "\n");
+    }
+    fprintf(f, "descriptor ");
     hex(f, c->cfg, c->cfgLen);
     fprintf(f, "\n");
     Float32 g;
@@ -1368,16 +1757,18 @@ static int snapshot(Cam *c, const char *path) {
 }
 
 static void usage(FILE *f) {
-    fprintf(f, "usage: brioctl                     show settings\n"
+    fprintf(f, "usage: brioctl [--camera ID] COMMAND   ID: index or serial number from 'brioctl list', or location 0x...\n"
+               "       brioctl                     show settings\n"
+               "       brioctl list [--json]       list the UVC cameras\n"
                "       brioctl --json              the same as one JSON object, for scripts\n"
                "       brioctl get NAME            print one value only (settings and micgain), exit 1 if unreadable\n"
                "       brioctl NAME VALUE ...      change settings, e.g. brioctl fov 78 flicker 50 hdr on\n"
                "       brioctl save [FILE]         save current settings (default ~/.config/brioctl/settings)\n"
                "       brioctl apply [FILE|PRESET] apply saved settings or a built-in preset\n"
-               "       brioctl profiles            list presets and saved files\n"
+               "       brioctl profiles [--json]   list presets and saved files\n"
                "       brioctl defaults            camera defaults for the settings below except mic and showmode\n"
                "       brioctl watch [FILE]        apply FILE now, when the camera is connected and when video starts\n"
-               "       brioctl factory-reset --yes restart the camera with factory settings, then restore yours\n"
+               "       brioctl factory-reset --yes restart the MX Brio with factory settings, then restore yours\n"
                "       brioctl dump                list all UVC units and extension controls (read-only)\n"
                "       brioctl snapshot [FILE]     write every register brioctl reads, serial masked (read-only)\n"
                "       brioctl --version           print the version\n");
@@ -1389,6 +1780,17 @@ static void usage(FILE *f) {
 }
 
 int main(int argc, char **argv) {
+    const char *camId = NULL;  // --camera ID may stand anywhere; take it out
+    int n = 1;
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--camera")) {
+            if (++i == argc) { usage(stderr); return 2; }
+            camId = argv[i];
+        } else if (!strncmp(argv[i], "--camera=", 9)) camId = argv[i] + 9;
+        else argv[n++] = argv[i];
+    }
+    argv[argc = n] = NULL;
+
     const char *cmd = argc > 1 ? argv[1] : "show";
     const char *arg = argc > 2 ? argv[2] : NULL;
     if (!strcmp(cmd, "-h") || !strcmp(cmd, "--help") || !strcmp(cmd, "help")) {
@@ -1399,16 +1801,21 @@ int main(int argc, char **argv) {
         printf("brioctl %s\n", VERSION);
         return 0;
     }
-    if (!strcmp(cmd, "watch")) return watch(arg ? arg : "settings");
+    if (!strcmp(cmd, "list") || !strcmp(cmd, "profiles")) {
+        if (argc > 3 || (arg && strcmp(arg, "--json"))) { usage(stderr); return 2; }
+        return !strcmp(cmd, "list") ? listCmd(arg != NULL) : profiles(arg != NULL);
+    }
+    if (!strcmp(cmd, "watch")) return watch(arg ? arg : "settings", camId);
+    int rc = 0;
 #ifdef BRIOCTL_FAKE
     if (!strcmp(cmd, "--test-reapply") && arg && argc <= 4) {  // test hook: what watch does, without the run loop
+        if ((rc = selectCamera(camId))) return rc;
         snprintf(watchPath, sizeof watchPath, "%s", arg);
         if (argc == 4 && !strcmp(argv[3], "video")) videoSettled(NULL, NULL);  // the timer callback of a video start
         else reapply(1, 0, 0);                                                 // the camera connected
         return 0;
     }
 #endif
-    if (!strcmp(cmd, "profiles")) return profiles();
     if (!strcmp(cmd, "get") && argc != 3) { usage(stderr); return 2; }
 
     static const char *const COMMANDS[] = {"show", "dump", "save", "apply", "defaults", "factory-reset", "--json",
@@ -1418,9 +1825,9 @@ int main(int argc, char **argv) {
         if (!strcmp(cmd, COMMANDS[i])) isCommand = 1;
     if (isCommand ? argc > 3 : argc % 2 == 0) { usage(stderr); return 2; }
 
+    if ((rc = selectCamera(camId))) return rc;
     Cam c;
     if (openCam(&c)) return 1;
-    int rc = 0;
     if (!strcmp(cmd, "show")) rc = show(&c);
     else if (!strcmp(cmd, "--json")) rc = showJson(&c);
     else if (!strcmp(cmd, "get")) rc = get(&c, arg);

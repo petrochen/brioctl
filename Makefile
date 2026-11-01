@@ -6,19 +6,23 @@ LABEL = com.github.petrochen.brioctl
 AGENT = $(HOME)/Library/LaunchAgents/$(LABEL).plist
 LOG = $(HOME)/Library/Logs/brioctl.log
 
-LIBS = -framework IOKit -framework CoreFoundation -framework CoreAudio
+LIBS = -framework IOKit -framework CoreFoundation -framework CoreAudio -framework CoreMediaIO
 DEFS = -DVERSION=\"$(VERSION)\"
 
 # Release build: one binary for Apple Silicon and Intel, runs on macOS 12 and later.
 UNIVERSAL = -arch arm64 -arch x86_64 -mmacosx-version-min=12.0
 DIST = brioctl-$(VERSION)-macos-universal
 
-brioctl: brioctl.c
+brioctl: brioctl.c Makefile
 	$(CC) $(CFLAGS) $(DEFS) -o $@ $< $(LIBS)
 
 # Offline tests: the same source against a camera read from tests/mxbrio-1.1.394.snap
 tests/brioctl-fake: brioctl.c Makefile
 	$(CC) $(CFLAGS) $(DEFS) -DBRIOCTL_FAKE -o $@ $< $(LIBS)
+
+# Rewrite the generated camera fixtures (tests/generic-uvc*.snap, tests/brio500-sim.snap) from the MX Brio snapshot.
+fixtures:
+	python3 tests/make-fixtures.py
 
 # Built from scratch every time: the binary embeds VERSION and CFLAGS, which can differ from run to run.
 test:
@@ -59,4 +63,4 @@ clean:
 	$(MAKE) -C tools clean
 	rm -rf brioctl tests/brioctl-fake tests/brioctl-fake.dSYM brioctl.dSYM brioctl-*-macos-universal brioctl-*.tar.gz
 
-.PHONY: universal dist install agent unagent clean test
+.PHONY: universal dist install agent unagent clean test fixtures
