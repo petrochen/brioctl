@@ -329,6 +329,24 @@ final class EndToEndWithFakeCLITests: XCTestCase {
         XCTAssertEqual(model.store.selectedCamera?.index, 2)
     }
 
+    func testHotkeysAreOffByDefaultAndRemembered() throws {
+        let suite = "com.github.petrochen.brioctl.app.tests.\(UUID().uuidString)"
+        defer { UserDefaults(suiteName: suite)?.removePersistentDomain(forName: suite) }
+        func model() -> AppModel {
+            AppModel(environment: AppEnvironment(processEnvironment: fake.environment.merging([
+                "BRIOCTL_APP_CLI": fake.executable.path, "BRIOCTL_APP_DEFAULTS_SUITE": suite,
+                "BRIOCTL_APP_AGENTS_DIR": fake.home.appendingPathComponent("agents").path]) { $1 },
+                bundle: Bundle(for: EndToEndWithFakeCLITests.self), home: fake.home), launchctl: RecordingLaunchctl())
+        }
+        let first = model()
+        XCTAssertFalse(first.hotkeysEnabled)
+        first.hotkeysEnabled = true
+        XCTAssertTrue(model().hotkeysEnabled, "remembered")
+        first.hotkeysEnabled = false  // unregisters the keys again
+        XCTAssertFalse(model().hotkeysEnabled)
+        XCTAssertNil(first.hotkeyProblem)
+    }
+
     func testAutoApplyUsesTheInjectedDirectoryOnly() async throws {
         let launchctl = RecordingLaunchctl()
         let agents = fake.home.appendingPathComponent("agents")

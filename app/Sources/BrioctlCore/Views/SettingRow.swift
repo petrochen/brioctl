@@ -42,6 +42,7 @@ struct SettingRow: View {
                 }
                 .labelsHidden()
                 .pickerStyle(.segmented)
+                .frame(maxWidth: .infinity)
             }
         case .popup(let choices):
             HStack {

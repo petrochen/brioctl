@@ -24,7 +24,7 @@ struct SettingsPage: View {
 
     private var hotkeys: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Toggle("Global hotkeys", isOn: $model.hotkeysEnabled)
+            Toggle("Global hotkeys", isOn: $model.hotkeysEnabled).toggleStyle(.switch)
             Text(HotkeyAction.allCases.map { "\($0.shortcut)  \($0.title)" }.joined(separator: "\n"))
                 .font(.caption).foregroundStyle(.secondary).monospacedDigit()
                 .fixedSize(horizontal: false, vertical: true)
@@ -37,6 +37,7 @@ struct SettingsPage: View {
     private var loginItem: some View {
         VStack(alignment: .leading, spacing: 4) {
             Toggle("Launch at login", isOn: Binding(get: { model.loginItem }, set: { model.setLoginItem($0) }))
+                .toggleStyle(.switch)
                 .disabled(!model.canStartAtLogin)
             Text(model.canStartAtLogin
                  ? "Writes ~/Library/LaunchAgents/\(AgentLabel.login).plist."
@@ -57,9 +58,10 @@ struct SettingsPage: View {
                 Toggle("Re-apply settings automatically", isOn: Binding(
                     get: { isOurs },
                     set: { on in Task { await model.setAutoApply(on) } }))
+                    .toggleStyle(.switch)
                     .disabled(model.store.state == nil && !isOurs)
             case .other:
-                Toggle("Re-apply settings automatically", isOn: .constant(true)).disabled(true)
+                Toggle("Re-apply settings automatically", isOn: .constant(true)).toggleStyle(.switch).disabled(true)
             }
             Text(autoApplyCaption).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             if case .app(let usesThisCopy) = model.watchState {
