@@ -1057,6 +1057,68 @@ assert d["presets"][1] == {"name": "warmer", "settings": {"warmth": "60"}}
     BRIOCTL_FAKE=: "$BIN" profiles --json > /dev/null
 }
 
+# --- watch: which camera it follows, and CoreMediaIO ------------------------------------------------------------------
+
+t_watch_target() {
+    expect "one MX Brio" "$("$BIN" --test-watch-target)" "046d:0944 serial=000000000000 uid=0x100000046d0944" || return 1
+    three_cameras
+    # several cameras, one known: the MX Brio, by its serial number
+    expect "the known one" "$("$BIN" --test-watch-target)" "046d:0944 serial=BRIOSERIAL1 uid=0x200000046d0944" || return 1
+    # --camera: any camera, followed by its ids and serial number
+    expect "a generic camera" "$("$BIN" --camera 3 --test-watch-target)" \
+        "1234:5678 serial=GENERIC0002 uid=0x30000012345678" || return 1
+    expect "by serial" "$("$BIN" --camera GENERIC0001 --test-watch-target)" "1234:5678 serial=GENERIC0001 uid=0x10000012345678" || return 1
+    "$BIN" --camera 9 --test-watch-target > /dev/null 2>&1; rc=$?
+    expect "no such camera" "$rc" 2 || return 1
+    # no camera known to brioctl: wait for the MX Brio, as 1.0 did, and say so; a FaceTime camera must not be taken
+    BRIOCTL_FAKE=$PWD/generic.snap
+    out=$("$BIN" --test-watch-target 2>&1); rc=$?
+    expect "status" "$rc" 0 || return 1
+    has "waits for the MX Brio" "$out" "waiting for the MX Brio" || return 1
+    has "and follows it" "$out" "046d:0944 serial= uid=0x0046d0944" || return 1
+    expect "with --camera it follows the camera" "$("$BIN" --camera 1 --test-watch-target)" \
+        "1234:5678 serial=000000000000 uid=0x10000012345678" || return 1
+    BRIOCTL_FAKE=$PWD/g1.snap:$PWD/g2.snap
+    has "two unknown cameras" "$("$BIN" --test-watch-target 2>&1)" "046d:0944 serial= " || return 1
+    # nothing connected: the MX Brio, without a remark
+    BRIOCTL_FAKE=:
+    expect "no camera" "$("$BIN" --test-watch-target)" "046d:0944 serial= uid=0x0046d0944" || return 1
+    "$BIN" --camera 1 --test-watch-target > /dev/null 2>&1; rc=$?
+    expect "no camera, --camera" "$rc" 1 || return 1
+    # two known cameras: a choice is needed
+    BRIOCTL_FAKE=$PWD/camera.snap:$PWD/brio500.snap
+    "$BIN" --test-watch-target > /dev/null 2>&1; rc=$?
+    expect "two known cameras" "$rc" 2
+}
+
+t_watch_applies_to_the_chosen_camera() {
+    three_cameras
+    printf 'zoom 150\nbrightness 90\n' > settings
+    # camera 3 is chosen; when it comes back the cameras are in another order, its serial number finds it
+    BRIOCTL_FAKE_AFTER=$PWD/g2.snap:$PWD/g1.snap:$PWD/brio.snap "$BIN" --camera GENERIC0002 --test-reapply "$PWD/settings" > out || return 1
+    has "applied" "$(cat out)" "applied (2 changed)" || return 1
+    has "the chosen camera got it" "$(grep '^reg 1 11 ' g2.snap)" "cur 9600" || return 1
+    has "the others did not" "$(grep '^reg 1 11 ' g1.snap)" "cur 7300" || return 1
+    has "the MX Brio did not" "$(grep '^reg 1 11 ' brio.snap)" "cur 7300" || return 1
+    # video start on the second MX Brio-like camera: only its own settings
+    printf 'zoom 160\n' > settings
+    "$BIN" --camera 2 --test-reapply "$PWD/settings" video > out || return 1
+    has "video started" "$(cat out)" "video started" || return 1
+    has "the MX Brio got it" "$(grep '^reg 1 11 ' brio.snap)" "cur a000" || return 1
+    has "and nobody else" "$(grep '^reg 1 11 ' g1.snap)" "cur 7300" || return 1
+    # a generic camera takes a settings file with Logitech lines: what fits is applied
+    printf 'fov 65\nzoom 170\n' > settings
+    "$BIN" --camera 1 --test-reapply "$PWD/settings" > out 2>&1 || return 1
+    has "zoom applied" "$(cat out)" "zoom 170" || return 1
+    has "no fov on it" "$(cat out)" "fov: control not found on this camera" || return 1
+    has "log line" "$(cat out)" "could not apply all settings (1 changed)"
+}
+
+t_cmio_hook() {
+    export BRIOCTL_FAKE=$PWD/generic.snap
+    expect "no CoreMediaIO device for an unknown camera" "$("$BIN" --test-cmio)" "cmio none"
+}
+
 # --- run -----------------------------------------------------------------------------------------------------------
 
 N=0
@@ -1143,6 +1205,9 @@ run "--json: group, writable, kind, min, max, step, choices and help for the GUI
 run "--json of a generic, an experimental and another camera" t_json_other_cameras
 run "errors with --json are text on stderr and a non-zero exit" t_json_errors_are_text
 run "profiles --json lists presets, saved files and the directory" t_profiles_json
+run "watch follows the chosen camera, or waits for the MX Brio" t_watch_target
+run "watch applies to the chosen camera, found again by its ids and serial" t_watch_applies_to_the_chosen_camera
+run "the CoreMediaIO lookup finds nothing for an unknown camera" t_cmio_hook
 
 echo "1..$N"
 if [ "$FAILED" -ne 0 ]; then

@@ -280,6 +280,14 @@ static int parseConfig(Cam *c) {
 
 static CamInfo target;  // the camera every command talks to, chosen by selectCamera (watch: by itself)
 
+static int usbNumber(io_service_t s, CFStringRef key) {
+    CFTypeRef v = IORegistryEntryCreateCFProperty(s, key, NULL, 0);
+    int n = 0;
+    if (v && CFGetTypeID(v) == CFNumberGetTypeID()) CFNumberGetValue(v, kCFNumberIntType, &n);
+    if (v) CFRelease(v);
+    return n;
+}
+
 static void usbString(io_service_t s, CFStringRef key, char *out, size_t n) {
     CFTypeRef v = IORegistryEntryCreateCFProperty(s, key, NULL, 0);
     out[0] = 0;
@@ -399,9 +407,10 @@ static int fakeLoad(const char *path) {
     return rc;
 }
 
-// The snapshot paths in BRIOCTL_FAKE; -1 if it is not set.
+// The snapshot paths in BRIOCTL_FAKE; -1 if it is not set. Once a camera is chosen, BRIOCTL_FAKE_AFTER (if set) is the
+// list instead: the cameras came back in another order, as after a reconnect.
 static int fakePaths(char paths[][PATH_MAX], int max) {
-    const char *env = getenv("BRIOCTL_FAKE");
+    const char *env = target.vid && getenv("BRIOCTL_FAKE_AFTER") ? getenv("BRIOCTL_FAKE_AFTER") : getenv("BRIOCTL_FAKE");
     if (!env || !*env) { fprintf(stderr, "BRIOCTL_FAKE is not set (path of a brioctl snapshot)\n"); return -1; }
     int n = 0;
     while (*env && n < max) {
@@ -537,14 +546,6 @@ static int closeCam(Cam *c) {
     if (c->dev) (*c->dev)->Release(c->dev);
     c->dev = NULL;
     return 0;
-}
-
-static int usbNumber(io_service_t s, CFStringRef key) {
-    CFTypeRef v = IORegistryEntryCreateCFProperty(s, key, NULL, 0);
-    int n = 0;
-    if (v && CFGetTypeID(v) == CFNumberGetTypeID()) CFNumberGetValue(v, kCFNumberIntType, &n);
-    if (v) CFRelease(v);
-    return n;
 }
 
 // Every USB device with a VideoControl interface (class 0x0e, subclass 1), one entry per device.
@@ -1593,7 +1594,9 @@ static void cameraArrived(void *refcon, io_iterator_t it) {
     for (io_service_t s; (s = IOIteratorNext(it)); IOObjectRelease(s)) {
         char serial[48];
         usbString(s, CFSTR("USB Serial Number"), serial, sizeof serial);
-        if (!target.serial[0] || !strcmp(serial, target.serial)) arrived = 1;
+        if (target.serial[0] && strcmp(serial, target.serial)) continue;
+        target.loc = (unsigned)usbNumber(s, CFSTR("locationID"));  // it may be on another port now
+        arrived = 1;
     }
     if (!arrived) return;
     stamp();
@@ -1606,6 +1609,7 @@ static void cameraArrived(void *refcon, io_iterator_t it) {
 #define HID_STREAM_REPORT 0x40
 #define VIDEO_SETTLE_SECONDS 2.0
 static CFRunLoopTimerRef videoTimer;
+static CFAbsoluteTime lastVideoApply;  // when the last apply for a video start ended
 
 static void videoSettled(CFRunLoopTimerRef timer, void *info) {
     (void)timer;
@@ -1614,6 +1618,7 @@ static void videoSettled(CFRunLoopTimerRef timer, void *info) {
     stamp();
     printf("video started\n");
     reapply(2, 0, 1);
+    lastVideoApply = CFAbsoluteTimeGetCurrent();
 }
 
 static void armVideoTimer(void) {  // every report restarts the wait, so one start gives one apply
@@ -1657,6 +1662,107 @@ static void hidRemoved(void *ctx, IOReturn result, void *sender, IOHIDDeviceRef 
     if (hidDevices <= 0 || --hidDevices) return;
     stamp();
     printf("HID device removed\n");
+}
+
+// Video start for every camera, through CoreMediaIO. macOS lists each camera there. For a USB UVC camera the device UID
+// is "0x" + the USB location id + vendor id + product id, the ids as 4 hex digits ("0x110000046d0944" for the MX Brio at
+// location 0x110000), the model UID is "UVC Camera VendorID_1133 ProductID_2372" (decimal) and the transport is 'usb '
+// (found on macOS 26 with an MX Brio). kCMIODevicePropertyDeviceIsRunningSomewhere is true while any app streams from
+// the camera. Reading it and listening to it does not open the camera and needs no camera permission.
+static CMIOObjectID cmioDev;  // the CoreMediaIO device being listened to, 0 if none
+static int cmioRunning;       // its DeviceIsRunningSomewhere the last time we looked
+
+static CMIOObjectPropertyAddress cmioAddress(UInt32 selector) {
+    return (CMIOObjectPropertyAddress){selector, kCMIOObjectPropertyScopeGlobal, kCMIOObjectPropertyElementMain};
+}
+
+static int cmioString(CMIOObjectID id, UInt32 selector, char *out, size_t n) {
+    CMIOObjectPropertyAddress a = cmioAddress(selector);
+    CFStringRef str = NULL;
+    UInt32 used = 0;
+    out[0] = 0;
+    if (CMIOObjectGetPropertyData(id, &a, 0, NULL, sizeof str, &used, &str) || !str) return -1;
+    int rc = CFStringGetCString(str, out, n, kCFStringEncodingUTF8) ? 0 : -1;
+    CFRelease(str);
+    return rc;
+}
+
+static int cmioRunningNow(CMIOObjectID id) {
+    CMIOObjectPropertyAddress a = cmioAddress(kCMIODevicePropertyDeviceIsRunningSomewhere);
+    UInt32 running = 0, used = 0;
+    return !CMIOObjectGetPropertyData(id, &a, 0, NULL, sizeof running, &used, &running) && running;
+}
+
+// The device UID CoreMediaIO gives the target camera.
+static void cmioUid(char *out, size_t n) { snprintf(out, n, "0x%x%04x%04x", target.loc, target.vid, target.pid); }
+
+// The CoreMediaIO device of the target camera: the one with its UID or, if the camera is on another port than we
+// think, the only USB device with its ids at the end of the UID. 0 if there is none.
+static CMIOObjectID cmioFind(char *uid, size_t n) {
+    CMIOObjectPropertyAddress a = cmioAddress(kCMIOHardwarePropertyDevices);
+    UInt32 size = 0, used = 0;
+    if (CMIOObjectGetPropertyDataSize(kCMIOObjectSystemObject, &a, 0, NULL, &size) || !size) return 0;
+    CMIOObjectID *ids = malloc(size), found = 0, only = 0;
+    char want[64], suffix[16], u[64];
+    int matches = 0;
+    cmioUid(want, sizeof want);
+    snprintf(suffix, sizeof suffix, "%04x%04x", target.vid, target.pid);
+    if (ids && !CMIOObjectGetPropertyData(kCMIOObjectSystemObject, &a, 0, NULL, size, &used, ids)) {
+        for (UInt32 i = 0; i < used / sizeof *ids; i++) {
+            size_t len;
+            if (cmioString(ids[i], kCMIODevicePropertyDeviceUID, u, sizeof u)) continue;
+            len = strlen(u);
+            if (!strcmp(u, want)) found = ids[i];
+            if (!strncmp(u, "0x", 2) && len >= 8 && !strcmp(u + len - 8, suffix)) only = ids[i], matches++;
+        }
+    }
+    free(ids);
+    if (!found && matches == 1) found = only;
+    if (found) cmioString(found, kCMIODevicePropertyDeviceUID, uid, n);
+    return found;
+}
+
+static void cmioChanged(CMIOObjectID id) {
+    if (id != cmioDev) return;
+    int now = cmioRunningNow(id);
+    // the HID report of the MX Brio comes with the same start: one apply for both
+    if (now && !cmioRunning && CFAbsoluteTimeGetCurrent() - lastVideoApply > 3.0) armVideoTimer();
+    cmioRunning = now;
+}
+
+// Listen to the target camera in CoreMediaIO if it is there and we do not already; called when devices come and go.
+static void cmioSync(void) {
+    char uid[64] = "";
+    CMIOObjectID id = cmioFind(uid, sizeof uid);
+    if (id == cmioDev) return;
+    cmioDev = id;
+    stamp();
+    if (!id) { printf("CoreMediaIO device removed\n"); return; }
+    cmioRunning = cmioRunningNow(id);
+    CMIOObjectPropertyAddress a = cmioAddress(kCMIODevicePropertyDeviceIsRunningSomewhere);
+    OSStatus st = CMIOObjectAddPropertyListenerBlock(id, &a, dispatch_get_main_queue(),
+                                                     ^(UInt32 n, const CMIOObjectPropertyAddress *changed) {
+                                                         (void)n;
+                                                         (void)changed;
+                                                         cmioChanged(id);
+                                                     });
+    if (st) printf("warning: cannot listen to CoreMediaIO (%d)\n", (int)st);
+    else printf("CoreMediaIO listening (%s)\n", uid);
+}
+
+static void cmioWatch(void) {
+    CMIOObjectPropertyAddress a = cmioAddress(kCMIOHardwarePropertyDevices);
+    OSStatus st = CMIOObjectAddPropertyListenerBlock(kCMIOObjectSystemObject, &a, dispatch_get_main_queue(),
+                                                     ^(UInt32 n, const CMIOObjectPropertyAddress *changed) {
+                                                         (void)n;
+                                                         (void)changed;
+                                                         cmioSync();
+                                                     });
+    if (st) {
+        stamp();
+        printf("warning: cannot watch CoreMediaIO devices (%d)\n", (int)st);
+    }
+    cmioSync();
 }
 
 // Listen to the camera's HID interface without seizing it; never sends or requests a report.
@@ -1722,6 +1828,7 @@ static int watch(const char *name, const char *camId) {
     stamp();
     printf("watching for %s, settings %s\n", camName(&target), watchPath);
     if (target.vid == VID_LOGITECH && target.pid == PID_MXBRIO) watchVideo();  // only it sends the HID report
+    cmioWatch();                                                                // every camera tells CoreMediaIO
     cameraArrived(NULL, it);  // the camera may already be connected; this also arms the notification
     CFRunLoopRun();
     return 0;
@@ -2011,6 +2118,21 @@ int main(int argc, char **argv) {
     if (!strcmp(cmd, "watch")) return watch(arg ? arg : "settings", camId);
     int rc = 0;
 #ifdef BRIOCTL_FAKE
+    if (!strcmp(cmd, "--test-watch-target")) {  // test hook: which camera would watch follow
+        char uid[64];
+        if ((rc = watchTarget(camId))) return rc;
+        cmioUid(uid, sizeof uid);
+        printf("%04x:%04x serial=%s uid=%s\n", target.vid, target.pid, target.serial, uid);
+        return 0;
+    }
+    if (!strcmp(cmd, "--test-cmio")) {  // test hook: the CoreMediaIO device of the chosen camera (reads only)
+        char uid[64] = "";
+        if ((rc = selectCamera(camId))) return rc;
+        CMIOObjectID id = cmioFind(uid, sizeof uid);
+        if (id) printf("cmio uid=%s running=%d\n", uid, cmioRunningNow(id));
+        else printf("cmio none\n");
+        return 0;
+    }
     if (!strcmp(cmd, "--test-reapply") && arg && argc <= 4) {  // test hook: what watch does, without the run loop
         if ((rc = selectCamera(camId))) return rc;
         snprintf(watchPath, sizeof watchPath, "%s", arg);
