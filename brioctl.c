@@ -3,17 +3,21 @@
 //
 // Sends UVC class requests to the camera's VideoControl interface through IOKit.
 // Only the controls listed in CTRLS are ever written, a Logitech extension-unit control only on a model listed in
-// MODELS; everything else is read-only.
+// MODELS; everything else is read-only. `import optionsplus` reads Logi Options+'s settings file and needs no camera.
 // Where each setting lives in the camera and how it behaves: docs/registers.md.
+#include <ctype.h>
 #include <dirent.h>
+#include <errno.h>
 #include <limits.h>
 #include <math.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+#include <sqlite3.h>
 #include <CoreAudio/CoreAudio.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <CoreMediaIO/CMIOHardware.h>
@@ -2089,6 +2093,8 @@ static void usage(FILE *f) {
                "       brioctl save [FILE]         save current settings (default ~/.config/brioctl/settings)\n"
                "       brioctl apply [FILE|PRESET] apply saved settings or a built-in preset\n"
                "       brioctl profiles [--json]   list presets and saved files\n"
+               "       brioctl import optionsplus [DB] [--save NAME]\n"
+               "                                   Logi Options+ camera settings as a settings file; no camera\n"
                "       brioctl defaults            camera defaults for the settings below except mic and showmode\n"
                "       brioctl watch [FILE]        apply FILE now, when the camera is connected and when video starts\n"
                "       brioctl factory-reset --yes restart the MX Brio with factory settings, then restore yours\n"
@@ -2103,6 +2109,561 @@ static void usage(FILE *f) {
         else fprintf(f, "  %-11s %s\n", CTRLS[i].name, help);
     }
     fprintf(f, "\nMicrophone (macOS, MX Brio only):\n  %-11s %s\n", "micgain", "input volume, 0-1");
+}
+
+// --- import: the camera settings Logi Options+ keeps, as a brioctl settings file ------------------------------------
+// Logi Options+ 2.9 keeps its settings as one JSON document in a SQLite file. SQLite's own JSON functions read it, so
+// brioctl has no JSON parser; only the fields named below are used, the account data in the same document is never
+// printed or kept.
+// The database is opened read-only and immutable: SQLite takes no lock and creates no journal, -wal or -shm file, so a
+// running Logi Options+ is not disturbed, and the camera is not needed. The price: changes that still sit in its -wal
+// file are not seen (said on stderr).
+// Where each field is and how sure its meaning is: the table in README.md ("Import from Logi Options+").
+#define OPLUS_SCHEMA 26  // schema_version of the files this was written from (Logi Options+ 2.9.994631)
+#define OPLUS_PROFILE "PROFILE_NAME_DEFAULT"
+
+// The latest document, and in it the profile to use: the one named PROFILE_NAME_DEFAULT, else the first of
+// profile_keys. (CAST: a BLOB would be read as JSONB.)
+#define OPLUS_WITH                                                                                                     \
+    "WITH doc(j) AS (SELECT CAST(file AS TEXT) FROM data ORDER BY _id DESC LIMIT 1), "                                 \
+    "prof(p) AS (SELECT t.value FROM doc, json_each(doc.j, '$.profile_keys') k, json_each(doc.j) t "                   \
+    "WHERE t.key = k.value ORDER BY json_extract(t.value, '$.name') IS NOT '" OPLUS_PROFILE "', k.key LIMIT 1) "
+
+// The settings cards of the profile, one per kind: the slot id is <camera slotPrefix>_webcam_<kind>_settings. Kinds
+// with presets (all but global) hold <kind>SettingsGroup = {selectedPresetName, <kind>Presets[]}. "known" are the
+// fields of the selected preset that are mapped; any other field in it is listed as skipped.
+enum { K_CROP, K_CAMERA, K_VIDEO, K_FOCUS, K_MIC, K_GLOBAL, K_COUNT };
+static const struct { const char *kind; const char *const *known; } OPLUS_KINDS[K_COUNT] = {
+    {"crop", (const char *const[]){"fov", "showMode", "zoom", "pan", "tilt", "rightsight", NULL}},
+    {"camera", (const char *const[]){"exposure", "gain", "exposureCompensation", "hdr", "priority", NULL}},
+    {"video", (const char *const[]){"whiteBalance", "whiteBalanceCompensation", "tint", "vibrance", "brightness",
+                                    "contrast", "saturation", "sharpness", NULL}},
+    {"focus", (const char *const[]){"focus", NULL}},
+    {"microphone", (const char *const[]){"volume", NULL}},
+    {"global", (const char *const[]){"antiFlicker", NULL}},
+};
+
+// Text from the document ends up in a settings file, so it is cut down to plain characters first: a line break in a
+// name must not make a line of its own.
+static void clean(const char *s, char *out, size_t n) {
+    size_t i = 0;
+    for (; s && *s && i + 1 < n; s++) out[i++] = isalnum((unsigned char)*s) || strchr("._+-: ", *s) ? *s : '?';
+    out[i] = 0;
+}
+
+// One value inside a JSON text, found by SQLite: json_type() says what is there.
+enum { J_NONE, J_NUM, J_BOOL, J_STR, J_OTHER };  // missing or null, number, true or false, text, object or array
+typedef struct { int kind; double num; char str[64]; } JV;
+
+static JV jx(sqlite3 *db, const char *json, const char *path) {
+    JV v = {J_NONE, 0, ""};
+    sqlite3_stmt *st;
+    if (!json || sqlite3_prepare_v2(db, "SELECT json_type(?1, ?2), json_extract(?1, ?2)", -1, &st, NULL)) return v;
+    sqlite3_bind_text(st, 1, json, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, path, -1, SQLITE_STATIC);
+    if (sqlite3_step(st) == SQLITE_ROW && sqlite3_column_type(st, 0) != SQLITE_NULL) {
+        const char *t = (const char *)sqlite3_column_text(st, 0);
+        if (!strcmp(t, "integer") || !strcmp(t, "real")) v.kind = J_NUM, v.num = sqlite3_column_double(st, 1);
+        else if (!strcmp(t, "true") || !strcmp(t, "false")) v.kind = J_BOOL, v.num = !strcmp(t, "true");
+        else if (!strcmp(t, "text")) v.kind = J_STR, snprintf(v.str, sizeof v.str, "%s", (const char *)sqlite3_column_text(st, 1));
+        else if (strcmp(t, "null")) v.kind = J_OTHER;
+    }
+    sqlite3_finalize(st);
+    return v;
+}
+
+typedef struct {
+    sqlite3 *db;
+    FILE *set, *skip;  // the "name value" lines with the # check lines beside them; the # skipped lines
+    int n;             // settings written
+} Imp;
+
+__attribute__((format(printf, 3, 4))) static void impSet(Imp *o, const char *name, const char *fmt, ...) {
+    va_list ap;
+    fprintf(o->set, "%s ", name);
+    va_start(ap, fmt);
+    vfprintf(o->set, fmt, ap);
+    va_end(ap);
+    fputc('\n', o->set);
+    o->n++;
+}
+
+// "# skipped: FIELD (WHY)": apply ignores comments
+__attribute__((format(printf, 3, 4))) static void impSkip(Imp *o, const char *field, const char *fmt, ...) {
+    va_list ap;
+    fprintf(o->skip, "# skipped: %s (", field);
+    va_start(ap, fmt);
+    vfprintf(o->skip, fmt, ap);
+    va_end(ap);
+    fputs(")\n", o->skip);
+}
+
+static void impMissing(Imp *o, const char *name) { impSkip(o, name, "not in the Logi Options+ settings"); }
+
+// A whole number between lo and hi. opt: Logi Options+ leaves the field out when it is not set, which is no news.
+static void impInt(Imp *o, const char *js, const char *path, const char *name, long lo, long hi, int opt) {
+    if (!js) return;
+    JV v = jx(o->db, js, path);
+    if (v.kind == J_NONE) {
+        if (!opt) impMissing(o, name);
+    } else if (v.kind != J_NUM) {
+        impSkip(o, name, "not a number");
+    } else if (v.num != floor(v.num) || v.num < lo || v.num > hi) {
+        impSkip(o, name, "%g is outside %ld-%ld", v.num, lo, hi);
+    } else {
+        impSet(o, name, "%ld", (long)v.num);
+    }
+}
+
+// A number that must be one of the listed ones (the list ends with 0).
+static void impOneOf(Imp *o, const char *js, const char *path, const char *name, const long *ok, int opt) {
+    if (!js) return;
+    JV v = jx(o->db, js, path);
+    if (v.kind == J_NONE) {
+        if (!opt) impMissing(o, name);
+        return;
+    }
+    if (v.kind != J_NUM) {
+        impSkip(o, name, "not a number");
+        return;
+    }
+    for (; *ok; ok++)
+        if (v.num == *ok) {
+            impSet(o, name, "%ld", *ok);
+            return;
+        }
+    impSkip(o, name, "%g has no equivalent", v.num);
+}
+
+static void impOnOff(Imp *o, const char *js, const char *path, const char *name) {  // always optional
+    if (!js) return;
+    JV v = jx(o->db, js, path);
+    if (v.kind == J_BOOL) impSet(o, name, "%s", v.num ? "on" : "off");
+    else if (v.kind != J_NONE) impSkip(o, name, "not true or false");
+}
+
+// A {"mode": ..., "value": ...} field. Returns 0 if there is no such field. *val is the value: 0 when the field has
+// none (proto3 JSON leaves out a zero), NAN when it is not a number.
+static int impModeValue(Imp *o, const char *js, const char *obj, char mode[32], double *val) {
+    char path[48];
+    mode[0] = 0;
+    *val = 0;
+    if (jx(o->db, js, obj).kind != J_OTHER) return 0;
+    snprintf(path, sizeof path, "%s.mode", obj);
+    JV m = jx(o->db, js, path);
+    if (m.kind == J_STR) clean(m.str, mode, 32);
+    snprintf(path, sizeof path, "%s.value", obj);
+    JV v = jx(o->db, js, path);
+    if (v.kind == J_NUM) *val = v.num;
+    else if (v.kind != J_NONE) *val = NAN;
+    return 1;
+}
+
+// A manual {mode, value} field with a whole value between lo and hi.
+static void impManual(Imp *o, const char *js, const char *obj, const char *name, long lo, long hi) {
+    char mode[32];
+    double v;
+    if (!js) return;
+    if (!impModeValue(o, js, obj, mode, &v)) impMissing(o, name);
+    else if (*mode && strcmp(mode, "MANUAL")) impSkip(o, name, "mode %s, not manual", mode);
+    else if (!(v == floor(v) && v >= lo && v <= hi)) impSkip(o, name, "%g is outside %ld-%ld", v, lo, hi);
+    else impSet(o, name, "%ld", (long)v);
+}
+
+// pan and tilt: only the centre means the same in brioctl, the unit of the others is not known.
+static void impCentre(Imp *o, const char *js, const char *obj, const char *name) {
+    char mode[32];
+    double v;
+    if (!js) return;
+    impModeValue(o, js, obj, mode, &v);
+    if (v == 0) impSet(o, name, "0");
+    else impSkip(o, name, "value %g is in units brioctl does not know", v);
+}
+
+static void impPriority(Imp *o, const char *cam) {
+    JV pr = jx(o->db, cam, "$.priority");
+    if (!cam) return;
+    if (pr.kind == J_STR && !strcmp(pr.str, "EXPOSURE")) impSet(o, "priority", "exposure");
+    else if (pr.kind == J_STR && !strcmp(pr.str, "FRAME_RATE")) impSet(o, "priority", "fps");
+    else if (pr.kind == J_NONE) impMissing(o, "priority");
+    else impSkip(o, "priority", "no equivalent");
+}
+
+static void impExposure(Imp *o, const char *cam) {
+    char mode[32];
+    double v;
+    if (!cam) return;
+    if (!impModeValue(o, cam, "$.exposure", mode, &v)) impMissing(o, "ae");
+    else if (!strcmp(mode, "AUTO")) impSet(o, "ae", "auto");
+    else if (!strcmp(mode, "MANUAL"))  // the shutter and gain numbers are Logi Options+'s own scale, not the camera's
+        impSkip(o, "ae, exposure, gain", "manual exposure: Logi Options+ does not use the camera's scale");
+    else impSkip(o, "ae", "unknown mode");
+}
+
+static void impWhiteBalance(Imp *o, const char *vid) {
+    char mode[32];
+    double v;
+    if (!vid) return;
+    if (!impModeValue(o, vid, "$.whiteBalance", mode, &v)) impMissing(o, "awb");
+    else if (!strcmp(mode, "AUTO")) impSet(o, "awb", "on");
+    else if (!strcmp(mode, "MANUAL") && v == floor(v) && v >= 2800 && v <= 7500) {
+        impSet(o, "awb", "off");
+        impSet(o, "wb", "%ld", (long)v);
+        fprintf(o->set, "# check: wb is taken as kelvin (not verified against the camera): compare the picture\n");
+    } else if (!strcmp(mode, "MANUAL")) {
+        impSkip(o, "awb, wb", "manual white balance %g is outside 2800-7500", v);
+    } else {
+        impSkip(o, "awb", "unknown mode");
+    }
+}
+
+static void impFocus(Imp *o, const char *foc) {
+    char mode[32];
+    double v;
+    if (!foc) return;
+    if (!impModeValue(o, foc, "$.focus", mode, &v)) impMissing(o, "af");
+    else if (!strcmp(mode, "AUTO")) impSet(o, "af", "on");
+    else if (!strcmp(mode, "MANUAL")) impSkip(o, "af, focus", "manual focus: its scale in Logi Options+ is not known");
+    else impSkip(o, "af", "unknown mode");
+}
+
+static void impMic(Imp *o, const char *mic) {
+    if (!mic) return;
+    JV ch = jx(o->db, mic, "$.volume.channel"), g = jx(o->db, mic, "$.volume.gain");
+    if (ch.kind == J_STR && !strcmp(ch.str, "INPUT") && g.kind == J_NUM && g.num >= 0 && g.num <= 1)
+        impSet(o, "micgain", "%.4f", g.num);
+    else impSkip(o, "micgain", "no input volume between 0 and 1 in the Logi Options+ settings");
+}
+
+// The lines go out in the order `save` writes them. Every value is checked against what the camera takes, so the file
+// is valid input for `apply`. The microphone on/off switch is not in the document: no mic line.
+static void impMap(Imp *o, char *const sj[K_COUNT]) {
+    const char *crop = sj[K_CROP], *cam = sj[K_CAMERA], *vid = sj[K_VIDEO];
+    static const long FOV[] = {90, 78, 65, 0}, FLICKER[] = {50, 60, 0};
+
+    impOneOf(o, crop, "$.fov", "fov", FOV, 0);
+    impOnOff(o, crop, "$.showMode", "showmode");
+    impOnOff(o, cam, "$.hdr", "hdr");
+    impInt(o, vid, "$.whiteBalanceCompensation", "warmth", 0, 100, 0);
+    impInt(o, vid, "$.tint", "tint", 0, 100, 1);
+    impInt(o, vid, "$.vibrance", "vibrance", 0, 255, 0);
+    impInt(o, cam, "$.exposureCompensation", "expcomp", 0, 255, 0);
+    impManual(o, crop, "$.zoom", "zoom", 100, 400);
+    impCentre(o, crop, "$.pan", "pan");
+    impCentre(o, crop, "$.tilt", "tilt");
+    impPriority(o, cam);
+    impExposure(o, cam);
+    impOneOf(o, sj[K_GLOBAL], "$.antiFlicker", "flicker", FLICKER, 1);
+    impManual(o, vid, "$.brightness", "brightness", 0, 255);
+    impManual(o, vid, "$.contrast", "contrast", 0, 255);
+    impManual(o, vid, "$.saturation", "saturation", 0, 255);
+    impManual(o, vid, "$.sharpness", "sharpness", 0, 255);
+    impWhiteBalance(o, vid);
+    impFocus(o, sj[K_FOCUS]);
+    impMic(o, sj[K_MIC]);
+}
+
+// What brioctl cannot take over, by name and never by value: RightSight when it is on (Logitech's app does the
+// framing), and every field of the selected presets that has no setting here.
+static void impLeftovers(Imp *o, char *const sj[K_COUNT]) {
+    if (jx(o->db, sj[K_CROP], "$.rightsight.enabled").num == 1)
+        impSkip(o, "rightsight", "on in Logi Options+: Logitech's app does the framing, brioctl cannot");
+    for (int k = 0; k < K_COUNT; k++) {
+        sqlite3_stmt *st;
+        if (!sj[k] || sqlite3_prepare_v2(o->db, "SELECT key FROM json_each(?1)", -1, &st, NULL)) continue;
+        sqlite3_bind_text(st, 1, sj[k], -1, SQLITE_STATIC);
+        while (sqlite3_step(st) == SQLITE_ROW) {
+            const char *key = (const char *)sqlite3_column_text(st, 0);
+            int mapped = !key;
+            for (const char *const *m = OPLUS_KINDS[k].known; *m && !mapped; m++) mapped = !strcmp(key, *m);
+            if (!mapped) {
+                char name[64];
+                clean(key, name, sizeof name);
+                impSkip(o, name, "no brioctl equivalent");
+            }
+        }
+        sqlite3_finalize(st);
+    }
+}
+
+// The JSON of the selected preset's settings of one kind (the preset named by selectedPresetName; if there is none, the
+// one marked userDefined), or of the global card when kind is NULL. A copy to free, NULL if the profile has none.
+static char *oplusCard(sqlite3 *db, const char *slotPrefix, const char *kind) {
+    char slot[96], presets[96], selected[96], settings[48], *json = NULL;
+    sqlite3_stmt *st;
+    snprintf(slot, sizeof slot, "%s_webcam_%s_settings", slotPrefix, kind ? kind : "global");
+    snprintf(presets, sizeof presets, "$.card.%sSettingsGroup.%sPresets", kind ? kind : "", kind ? kind : "");
+    snprintf(selected, sizeof selected, "$.card.%sSettingsGroup.selectedPresetName", kind ? kind : "");
+    snprintf(settings, sizeof settings, "$.%sSettings", kind ? kind : "");
+    const char *sql = kind ? OPLUS_WITH
+        "SELECT json_extract(pr.value, ?4) FROM prof, json_each(prof.p, '$.assignments') a, json_each(a.value, ?2) pr "
+        "WHERE json_extract(a.value, '$.slotId') = ?1 "
+        "AND (json_extract(pr.value, '$.presetName') = json_extract(a.value, ?3) "
+        "OR json_extract(pr.value, '$.userDefined') = 1) "
+        "ORDER BY json_extract(pr.value, '$.presetName') = json_extract(a.value, ?3) DESC, pr.key LIMIT 1"
+        : OPLUS_WITH
+        "SELECT json_extract(a.value, '$.card.webcamGlobalSettings') FROM prof, json_each(prof.p, '$.assignments') a "
+        "WHERE json_extract(a.value, '$.slotId') = ?1 LIMIT 1";
+    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL)) return NULL;
+    sqlite3_bind_text(st, 1, slot, -1, SQLITE_STATIC);
+    if (kind) {
+        sqlite3_bind_text(st, 2, presets, -1, SQLITE_STATIC);
+        sqlite3_bind_text(st, 3, selected, -1, SQLITE_STATIC);
+        sqlite3_bind_text(st, 4, settings, -1, SQLITE_STATIC);
+    }
+    if (sqlite3_step(st) == SQLITE_ROW && sqlite3_column_type(st, 0) != SQLITE_NULL)
+        json = strdup((const char *)sqlite3_column_text(st, 0));
+    sqlite3_finalize(st);
+    return json;
+}
+
+typedef struct { int pid; char slot[64]; } OplusCam;
+
+// The error for a database that is not what this was written for: the schema version found is part of it.
+static int oplusLayout(const char *path, const char *why, const char *version) {
+    fprintf(stderr, "%s: unexpected layout, %s (schema_version %s, brioctl knows %d)\n", path, why,
+            version[0] ? version : "unknown", OPLUS_SCHEMA);
+    return 1;
+}
+
+// Open the database read-only and immutable. Returns 0 or the exit code, after saying why not.
+static int oplusOpen(const char *path, sqlite3 **db) {
+    char real[PATH_MAX], uri[PATH_MAX * 3 + 64], wal[PATH_MAX + 8], *u = uri;
+    struct stat sb;
+    if (!realpath(path, real)) {
+        if (errno == ENOENT || errno == ENOTDIR) fprintf(stderr, "Logi Options+ settings not found at %s\n", path);
+        else perror(path);
+        return 1;
+    }
+    u += snprintf(u, 6, "file:");  // a URI: % ? # in the path are escaped
+    for (const char *s = real; *s; s++)
+        if (*s == '%' || *s == '?' || *s == '#') u += snprintf(u, 4, "%%%02X", *s);
+        else *u++ = *s;
+    snprintf(u, uri + sizeof uri - u, "?mode=ro&immutable=1");
+    if (sqlite3_open_v2(uri, db, SQLITE_OPEN_READONLY | SQLITE_OPEN_URI, NULL)) {
+        fprintf(stderr, "cannot open %s: %s\n", path, *db ? sqlite3_errmsg(*db) : "out of memory");
+        sqlite3_close(*db);
+        return 1;
+    }
+    snprintf(wal, sizeof wal, "%s-wal", real);
+    if (!stat(wal, &sb) && sb.st_size > 0)
+        fprintf(stderr,
+                "warning: %s-wal exists, so Logi Options+ is running or did not quit cleanly: changes it has not\n"
+                "written to %s yet are not read (quit Logi Options+ and import again if the result looks old)\n",
+                path, path);
+    return 0;
+}
+
+// The latest document must be JSON with the two lists this reads. Returns 0 and its schema and app versions, or 1 after
+// saying why not.
+static int oplusCheck(sqlite3 *db, const char *path, char version[16], char app[32]) {
+    sqlite3_stmt *st = NULL;
+    int rc = 1;
+    int step = sqlite3_prepare_v2(db, OPLUS_WITH
+        "SELECT json_valid(j), CASE WHEN json_valid(j) THEN json_extract(j, '$.schema_version') END, "
+        "CASE WHEN json_valid(j) THEN json_extract(j, '$.analytics_app_version') END, "
+        "CASE WHEN json_valid(j) THEN json_type(j, '$.ever_connected_devices.devices') END, "
+        "CASE WHEN json_valid(j) THEN json_type(j, '$.profile_keys') END FROM doc", -1, &st, NULL)
+                   ? SQLITE_ERROR
+                   : sqlite3_step(st);
+    const char *devices = NULL, *keys = NULL;
+    version[0] = app[0] = 0;
+    if (step == SQLITE_ROW) {
+        clean((const char *)sqlite3_column_text(st, 1), version, 16);
+        clean((const char *)sqlite3_column_text(st, 2), app, 32);
+        devices = (const char *)sqlite3_column_text(st, 3);
+        keys = (const char *)sqlite3_column_text(st, 4);
+    }
+    if (sqlite3_errcode(db) == SQLITE_NOTADB) fprintf(stderr, "%s is not a SQLite database\n", path);
+    else if (step == SQLITE_ERROR) oplusLayout(path, sqlite3_errmsg(db), version);
+    else if (step == SQLITE_DONE) oplusLayout(path, "no settings document in the data table", version);
+    else if (!sqlite3_column_int(st, 0)) oplusLayout(path, "the settings document is not JSON", version);
+    else if (!devices || strcmp(devices, "array")) oplusLayout(path, "no list of devices", version);
+    else if (!keys || strcmp(keys, "array")) oplusLayout(path, "no list of profiles", version);
+    else rc = 0;
+    sqlite3_finalize(st);
+    return rc;
+}
+
+// The cameras of the document that have a slot prefix, which is what their settings are filed under. *pick is the one
+// to use, the MX Brio else the first; *distinct counts the different slot prefixes. Returns how many there are.
+static int oplusCameras(sqlite3 *db, OplusCam *cams, int max, int *pick, int *distinct) {
+    sqlite3_stmt *st;
+    int n = 0;
+    *pick = *distinct = 0;
+    if (sqlite3_prepare_v2(db, OPLUS_WITH
+        "SELECT json_extract(d.value, '$.udid'), json_extract(d.value, '$.slotPrefix') "
+        "FROM doc, json_each(doc.j, '$.ever_connected_devices.devices') d "
+        "WHERE json_extract(d.value, '$.deviceType') = 'CAMERA' ORDER BY d.key", -1, &st, NULL))
+        return 0;
+    while (sqlite3_step(st) == SQLITE_ROW && n < max) {
+        const char *udid = (const char *)sqlite3_column_text(st, 0), *slot = (const char *)sqlite3_column_text(st, 1);
+        char *end = NULL;
+        if (!slot || !*slot || strlen(slot) >= sizeof cams[0].slot) continue;
+        snprintf(cams[n].slot, sizeof cams[n].slot, "%s", slot);
+        cams[n].pid = udid ? (int)strtol(udid, &end, 16) : -1;  // the udid starts with the product id: "0944,..."
+        if (!udid || end != udid + 4 || *end != ',') cams[n].pid = -1;
+        int seen = 0;
+        for (int i = 0; i < n; i++) seen |= !strcmp(cams[i].slot, slot);
+        *distinct += !seen;
+        if (cams[n].pid == PID_MXBRIO && cams[*pick].pid != PID_MXBRIO) *pick = n;
+        n++;
+    }
+    sqlite3_finalize(st);
+    return n;
+}
+
+// The name of the profile in use; 0 if there is none.
+static int oplusProfile(sqlite3 *db, char name[64]) {
+    sqlite3_stmt *st;
+    int found = 0;
+    name[0] = 0;
+    if (sqlite3_prepare_v2(db, OPLUS_WITH "SELECT json_extract(p, '$.name') FROM prof", -1, &st, NULL)) return 0;
+    if ((found = sqlite3_step(st) == SQLITE_ROW)) clean((const char *)sqlite3_column_text(st, 0), name, 64);
+    sqlite3_finalize(st);
+    return found;
+}
+
+// The comment lines that start a settings file: when, from what, for which camera.
+static void oplusHeader(char head[512], const char *app, const OplusCam *cam, int distinct, const char *profile) {
+    const char *model = NULL;
+    char name[48], ts[32];
+    int h;
+    time_t t = time(NULL);
+    for (size_t i = 0; i < sizeof MODELS / sizeof *MODELS; i++)
+        if (MODELS[i].pid == cam->pid) model = MODELS[i].name;
+    if (model) snprintf(name, sizeof name, "%s", model);
+    else if (cam->pid >= 0) snprintf(name, sizeof name, "Logitech %04x", cam->pid);
+    else snprintf(name, sizeof name, "unknown camera");
+    strftime(ts, sizeof ts, "%Y-%m-%d %H:%M", localtime(&t));
+    h = snprintf(head, 512, "# imported from Logi Options+%s%s on %s\n", app[0] ? " " : "", app, ts);
+    // the same line save writes, so apply warns when the file is for another model; Options+ has Logitech cameras only
+    if (cam->pid >= 0) h += snprintf(head + h, 512 - h, "# camera %04x:%04x\n", VID_LOGITECH, cam->pid);
+    if (distinct == 1) snprintf(head + h, 512 - h, "# %s, profile %s\n", name, profile);
+    else if (cam->pid == PID_MXBRIO)
+        snprintf(head + h, 512 - h, "# %s (of %d cameras in the settings), profile %s\n", name, distinct, profile);
+    else
+        snprintf(head + h, 512 - h, "# %s (the first of %d cameras in the settings, no MX Brio), profile %s\n", name,
+                 distinct, profile);
+}
+
+// Read the settings of the camera from the Logi Options+ database at path. Returns 0, the text of the settings file in
+// *text (to free) and the number of settings in *count; or the exit code, after saying why not.
+static int oplusRead(const char *path, char **text, int *count) {
+    sqlite3 *db = NULL;
+    OplusCam cams[MAX_CAMS];
+    char version[16], app[32], profile[64], head[512], *sj[K_COUNT] = {0}, *setText = NULL, *skipText = NULL;
+    size_t setLen = 0, skipLen = 0;
+    int rc = oplusOpen(path, &db), pick, distinct;
+    Imp o = {db, NULL, NULL, 0};
+    if (rc) return rc;
+    rc = 1;
+    if (oplusCheck(db, path, version, app)) goto done;
+    if (!oplusCameras(db, cams, MAX_CAMS, &pick, &distinct)) {
+        fprintf(stderr, "no camera found in the Logi Options+ settings at %s\n", path);
+        goto done;
+    }
+    if (!oplusProfile(db, profile)) {
+        fprintf(stderr, "no profile found in the Logi Options+ settings at %s\n", path);
+        goto done;
+    }
+    for (int k = 0; k < K_COUNT; k++)
+        sj[k] = oplusCard(db, cams[pick].slot, k == K_GLOBAL ? NULL : OPLUS_KINDS[k].kind);
+
+    o.set = open_memstream(&setText, &setLen);
+    o.skip = open_memstream(&skipText, &skipLen);
+    if (!o.set || !o.skip) {
+        fprintf(stderr, "out of memory\n");
+        goto done;
+    }
+    for (int k = 0; k < K_COUNT; k++)
+        if (!sj[k]) {
+            char field[32];
+            snprintf(field, sizeof field, "%s settings", OPLUS_KINDS[k].kind);
+            impSkip(&o, field, "none for this camera in the profile");
+        }
+    impMap(&o, sj);
+    fputs("# skipped: mic (Logi Options+ does not keep the camera microphone on or off; apply leaves it as it is)\n",
+          o.skip);
+    impLeftovers(&o, sj);
+    if (atoi(version) != OPLUS_SCHEMA)
+        fprintf(o.set, "# check: Logi Options+ settings schema %s, brioctl was written for %d: compare the result\n",
+                version[0] ? version : "?", OPLUS_SCHEMA);
+    fclose(o.set);
+    fclose(o.skip);  // the buffers are complete now
+    o.set = o.skip = NULL;
+    oplusHeader(head, app, &cams[pick], distinct, profile);
+    if (!o.n) {
+        fprintf(stderr, "nothing to import from the Logi Options+ settings at %s\n%s", path, skipText);
+    } else if (asprintf(text, "%s%s%s", head, setText, skipText) < 0) {
+        fprintf(stderr, "out of memory\n");
+    } else {
+        *count = o.n;
+        rc = 0;
+    }
+done:
+    if (o.set) fclose(o.set);
+    if (o.skip) fclose(o.skip);
+    free(setText);
+    free(skipText);
+    for (int k = 0; k < K_COUNT; k++) free(sj[k]);
+    sqlite3_close(db);
+    return rc;
+}
+
+// brioctl import optionsplus [DB] [--save NAME]
+static int importCmd(int argc, char **argv) {
+    const char *db = NULL, *save = NULL;
+    char dflt[PATH_MAX];
+    if (argc < 3 || argv[2][0] == '-') { usage(stderr); return 2; }
+    if (strcmp(argv[2], "optionsplus")) {
+        fprintf(stderr, "import: unknown source %s (optionsplus is the one there is)\n", argv[2]);
+        return 2;
+    }
+    for (int i = 3; i < argc; i++) {
+        if (!strcmp(argv[i], "--save") && i + 1 < argc && !save) save = argv[++i];
+        else if (!strncmp(argv[i], "--save=", 7) && !save) save = argv[i] + 7;
+        else if (argv[i][0] != '-' && !db) db = argv[i];
+        else { usage(stderr); return 2; }
+    }
+    if (save && !*save) { usage(stderr); return 2; }
+    if (save && presetSettings(save)) {
+        fprintf(stderr, "%s is a built-in preset, choose another name\n", save);
+        return 1;
+    }
+    if (!db) {
+        const char *home = getenv("HOME");
+        if (!home || !*home) {
+            fprintf(stderr, "HOME is not set: give the path of the Logi Options+ settings.db\n");
+            return 1;
+        }
+        snprintf(dflt, sizeof dflt, "%s/Library/Application Support/LogiOptionsPlus/settings.db", home);
+        db = dflt;
+    }
+
+    char *text = NULL;
+    int n = 0, rc = oplusRead(db, &text, &n);
+    if (rc) return rc;
+    // the comments that say what was left out or is doubtful: on stderr too, unless they are on the screen already
+    if (save || !isatty(1))
+        for (const char *line = text; line && *line; line = strchr(line, '\n') ? strchr(line, '\n') + 1 : NULL)
+            if (!strncmp(line, "# skipped:", 10) || !strncmp(line, "# check:", 8))
+                fprintf(stderr, "%.*s\n", (int)strcspn(line, "\n"), line);
+    if (!save) {
+        fputs(text, stdout);
+        free(text);
+        return 0;
+    }
+    char path[PATH_MAX];
+    configPath(save, path, sizeof path);
+    makeConfigDir();
+    FILE *f = fopen(path, "w");
+    if (!f) { perror(path); free(text); return 1; }
+    int bad = fputs(text, f) < 0;
+    free(text);
+    if (fclose(f) || bad) { perror(path); return 1; }
+    printf("imported %d settings to %s\n", n, path);
+    return 0;
 }
 
 int main(int argc, char **argv) {
@@ -2131,6 +2692,7 @@ int main(int argc, char **argv) {
         if (argc > 3 || (arg && strcmp(arg, "--json"))) { usage(stderr); return 2; }
         return !strcmp(cmd, "list") ? listCmd(arg != NULL) : profiles(arg != NULL);
     }
+    if (!strcmp(cmd, "import")) return importCmd(argc, argv);  // reads Logi Options+'s file, not a camera
     if (!strcmp(cmd, "watch")) return watch(arg ? arg : "settings", camId);
     int rc = 0;
 #ifdef BRIOCTL_FAKE

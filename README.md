@@ -21,6 +21,7 @@ Not affiliated with or endorsed by Logitech. See [Disclaimer](#disclaimer).
   contrast, saturation, sharpness, auto white balance, white balance temperature, autofocus, focus, low-light priority.
 - The macOS input volume of the camera microphone (`micgain`).
 - Presets, including `colorboost`, and named settings files: `save` and `apply`.
+- `import optionsplus` turns the settings Logi Options+ saved for the camera into a settings file, without a camera.
 - `watch`, a LaunchAgent that re-applies your settings when the camera is connected and when video starts.
 - `--json` output and `get NAME` for scripts.
 - `snapshot` for bug reports, `defaults` to go back to the camera's default values, and `factory-reset` to restart the
@@ -87,6 +88,7 @@ brioctl save                         # save the current settings to ~/.config/br
 brioctl save meeting                 # or to ~/.config/brioctl/meeting
 brioctl apply                        # put the saved settings back (apply meeting, apply warmer, ...)
 brioctl profiles [--json]            # list the presets and the saved files
+brioctl import optionsplus [DB]      # the settings Logi Options+ saved, as a settings file (--save NAME writes it)
 brioctl defaults                     # camera default values, except mic and showmode; no restart
 brioctl factory-reset --yes          # restart the camera with factory settings, then restore yours
 brioctl watch                        # apply now, on connect and on video start (see below)
@@ -257,6 +259,75 @@ prints what the camera accepts.
 lost when the video restarts and when saturation is written. `saturation 255` gives the same picture from the default
 128, and the camera keeps it, so the preset uses that. The measurements are in [docs/registers.md](docs/registers.md).
 
+## Import from Logi Options+
+
+If Logi Options+ has set up your camera, `brioctl import optionsplus` turns the settings it saved into a brioctl
+settings file. That helps after a power loss or a factory reset, or when you remove Logi Options+ and want the same
+picture. It needs no camera and writes nothing to the camera or to the app's files.
+
+```sh
+brioctl import optionsplus                  # print the settings file
+brioctl import optionsplus --save fromapp   # write it to ~/.config/brioctl/fromapp instead
+brioctl apply fromapp                       # put it on the camera
+brioctl import optionsplus ~/backup/settings.db   # a copy of the database
+```
+
+It reads `~/Library/Application Support/LogiOptionsPlus/settings.db`, or the file you name. The output starts with
+`# imported from ...` comments, then one `name value` line per setting, then `# skipped:` lines for everything it did
+not take over (the same lines go to stderr). Short example:
+
+```
+# imported from Logi Options+ 2.9.994631 on 2026-11-01 22:17
+# camera 046d:0944
+# MX Brio, profile PROFILE_NAME_DEFAULT
+fov 78
+showmode on
+...
+awb on
+af on
+micgain 0.2785
+# skipped: mic (Logi Options+ does not keep the camera microphone on or off; apply leaves it as it is)
+# skipped: videoPreview (no brioctl equivalent)
+```
+
+What it takes, for the preset each card of the app has selected in the profile `PROFILE_NAME_DEFAULT` (the first
+profile if there is none of that name), and the MX Brio first if the app knows several cameras:
+
+| Logi Options+                                 | brioctl                                             |
+| --------------------------------------------- | --------------------------------------------------- |
+| field of view 90, 78, 65; Show Mode; HDR      | `fov`, `showmode`, `hdr`                            |
+| warmth, tint, vibrance, exposure compensation | `warmth`, `tint`, `vibrance`, `expcomp`             |
+| zoom                                          | `zoom`                                              |
+| low-light priority                            | `priority exposure` or `fps`                        |
+| automatic exposure                            | `ae auto`                                           |
+| anti-flicker 50 or 60                         | `flicker`                                           |
+| brightness, contrast, saturation, sharpness   | the same names                                      |
+| white balance: automatic                      | `awb on`                                            |
+| white balance: manual                         | `awb off`, `wb`, with a `# check:` line (see below) |
+| autofocus                                     | `af on`                                             |
+| microphone volume (input)                     | `micgain`                                           |
+
+What it leaves out, and why:
+
+- Manual exposure time and gain. The numbers in Logi Options+ are its own scale and were not matched to the camera's
+  units, so a manual exposure is skipped as a whole (`ae`, `exposure`, `gain`).
+- Manual focus, and pan or tilt away from the centre: the scale of the numbers is not known. Pan and tilt at the centre
+  become `pan 0` and `tilt 0`.
+- Manual white balance is imported as kelvin, which is probably what it is but has not been checked against the
+  camera, so the file says `# check:` next to it. Values outside 2800 to 7500 are skipped.
+- RightSight (Logitech's app does the framing on the computer), the video preview, background blur and the like: they
+  are not camera settings. They are listed by name when the app has them on.
+- The camera microphone on and off (`mic`). The app does not keep it in this file, so the imported file has no `mic`
+  line and `apply` leaves the microphone as it is.
+- A field the app left out is not guessed. Optional ones (HDR, Show Mode, tint, anti-flicker) give no line and no
+  comment; any other missing or out-of-range field gets a `# skipped:` line.
+
+The format was read from Logi Options+ 2.9.994631 (settings schema 26). Another schema version is imported too, with a
+`# check:` line and a warning. A file that does not look like Logi Options+ settings is an error that names the schema
+version it found. The database is opened read-only and immutable, so a running Logi Options+ is not disturbed, but
+changes it still holds in `settings.db-wal` are not seen: brioctl says so on stderr, and quitting the app before the
+import fixes it. Logi Tune keeps nothing on disk to import: run `brioctl save` while the camera has your settings.
+
 ## JSON
 
 `brioctl --json` prints one JSON object on one line, for scripts and apps. Errors are not JSON: they go to stderr as
@@ -345,6 +416,9 @@ brioctl writes to the camera, so it is careful about what it writes.
 - A value that is already set is not written again, which avoids needless flash wear and camera restarts.
 - After each write it reads the value back. If the camera did not keep it, brioctl says so and exits with an error.
 - `save` leaves out values that the camera would not accept.
+- `import optionsplus` never opens the camera. It opens Logi Options+'s database read-only and immutable, so SQLite
+  creates, locks and changes nothing in the app's folder. It uses only the camera settings in the document; the
+  account data stored beside them is never printed or kept.
 - `factory-reset` works on the MX Brio only. It does nothing without `--yes`. With it, your settings are saved to `~/.config/brioctl/before-reset`
   first and applied again after the camera is back.
 - `dump` asks the service registers, and all registers of an extension unit it does not know, only for `GET_INFO` and
@@ -389,6 +463,9 @@ requests from a register snapshot, `tests/mxbrio-1.1.394.snap`, which was taken 
 `brioctl snapshot`. `BRIOCTL_FAKE` can name several snapshots separated by `:`, which gives several cameras for `list`
 and `--camera`. `tests/make-fixtures.py` (`make fixtures`) derives the other fixtures from the MX Brio snapshot: a
 generic UVC camera without extension units, one with more standard controls, and a simulated Brio 500.
+The `import optionsplus` tests read `tests/optionsplus-sample.db`, the settings database of Logi Options+ 2.9.994631
+with the serial number and ids replaced (`tests/optionsplus-sample.json` is the document in it); the tests derive the
+variants they need from the JSON with Python.
 
 For a bug report, run `brioctl snapshot report.snap` and attach the file. It contains the USB descriptor and every
 register brioctl reads, with the serial number replaced by zeros. It is read-only.

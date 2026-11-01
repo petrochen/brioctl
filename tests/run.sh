@@ -2,19 +2,22 @@
 # Offline tests for brioctl: the same source built with -DBRIOCTL_FAKE, so it talks to a camera that is read from a
 # snapshot file (tests/mxbrio-1.1.394.snap, taken from a real MX Brio with `brioctl snapshot`) instead of USB.
 # Every test gets its own copy of the snapshot (camera.snap) and of the other fixtures (generic.snap, extra.snap,
-# brio500.snap: see make-fixtures.py) and its own HOME. Run it with `make test`.
+# brio500.snap: see make-fixtures.py) and its own HOME. `import optionsplus` reads optionsplus.db, a copy of
+# tests/optionsplus-sample.db (the settings database of Logi Options+ 2.9.994631 with a made-up serial number and ids;
+# optionsplus-sample.json is the document in it). Run it with `make test`.
 set -u
 
 HERE=$(cd "$(dirname "$0")" && pwd) || exit 1
 BIN=${BIN:-$HERE/brioctl-fake}
 FIXTURE=$HERE/mxbrio-1.1.394.snap
 GENERIC=$HERE/generic-uvc.snap EXTRA=$HERE/generic-uvc-extra.snap BRIO500=$HERE/brio500-sim.snap
+OPLUS=$HERE/optionsplus-sample.db OPLUS_JSON=$HERE/optionsplus-sample.json
 ROOT=$(mktemp -d "${TMPDIR:-/tmp}/brioctl-test.XXXXXX") || exit 1
 trap 'rm -rf "$ROOT"' EXIT
 trap 'exit 1' HUP INT TERM
 
 [ -x "$BIN" ] || { echo "Bail out! $BIN is not built (make test builds it)"; exit 1; }
-for f in "$FIXTURE" "$GENERIC" "$EXTRA" "$BRIO500"; do
+for f in "$FIXTURE" "$GENERIC" "$EXTRA" "$BRIO500" "$OPLUS" "$OPLUS_JSON"; do
     [ -f "$f" ] || { echo "Bail out! missing $f (make fixtures)"; exit 1; }
 done
 
@@ -1130,6 +1133,437 @@ t_cmio_hook() {
     expect "no CoreMediaIO device for an unknown camera" "$("$BIN" --test-cmio)" "cmio none"
 }
 
+# --- import optionsplus --------------------------------------------------------------------------------------------------
+
+# What import writes for the sample database, without the date line. The twenty settings are the ones in the camera
+# snapshot (taken while Logi Options+ had set them), the comments say what is left out.
+OPLUS_LINES='fov 78
+showmode on
+hdr on
+warmth 62
+tint 50
+vibrance 128
+expcomp 128
+zoom 115
+pan 0
+tilt 0
+priority exposure
+ae auto
+flicker 60
+brightness 128
+contrast 128
+saturation 128
+sharpness 128
+awb on
+af on
+micgain 0.2785'
+OPLUS_NOTES='# skipped: mic (Logi Options+ does not keep the camera microphone on or off; apply leaves it as it is)
+# skipped: stopVideoOnAppFocusLoss (no brioctl equivalent)
+# skipped: videoPreview (no brioctl equivalent)'
+
+# oplus_python: skip the test (status 77) when there is no python3 to build database variants with
+oplus_python() { python3 -I -c pass >/dev/null 2>&1 || { echo "# python3 not available"; return 77; }; }
+
+# mkdb FILE 'PYTHON': a Logi Options+ settings database in the real two-table schema, made from the sample document
+# after PYTHON has changed it. In PYTHON, d is the document, P its profile, card(KIND) the card of the camera for KIND
+# (camera, crop, focus, global, microphone, video) and sel(KIND) the settings of the preset that card selects.
+mkdb() {
+    python3 -I - "$OPLUS_JSON" "$1" "$2" <<'EOF'
+import json, os, sqlite3, sys
+src, dst, code = sys.argv[1:4]
+d = json.load(open(src))
+P = d["profile-00000000-0000-0000-0000-000000000000"]
+def card(kind):
+    return [a["card"] for a in P["assignments"] if a["slotId"].endswith("_webcam_%s_settings" % kind)][0]
+def sel(kind):
+    g = card(kind)[kind + "SettingsGroup"]
+    return [x for x in g[kind + "Presets"] if x["presetName"] == g["selectedPresetName"]][0][kind + "Settings"]
+exec(code)
+if os.path.exists(dst):
+    os.remove(dst)
+c = sqlite3.connect(dst)
+c.executescript("""
+CREATE TABLE data(_id INTEGER PRIMARY KEY,_date_created datetime default current_timestamp,file BLOB NOT NULL);
+CREATE TABLE snapshots(_id INTEGER PRIMARY KEY,_date_created datetime default current_timestamp,uuid TEXT NOT NULL,label TEXT NOT NULL,file BLOB NOT NULL);
+""")
+c.execute("INSERT INTO data(file) VALUES (?)", (json.dumps(d, indent=2, sort_keys=True).encode(),))
+c.commit()
+c.close()
+EOF
+}
+
+t_import_sample() {
+    out=$("$BIN" import optionsplus optionsplus.db 2> err); rc=$?
+    expect "status" "$rc" 0 || return 1
+    expect "the twenty settings" "$(printf '%s\n' "$out" | grep -v '^#')" "$OPLUS_LINES" || return 1
+    matches "date line" "$(printf '%s\n' "$out" | sed -n 1p)" \
+        '^# imported from Logi Options\+ 2\.9\.994631 on [0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}$' || return 1
+    expect "everything else" "$(printf '%s\n' "$out" | sed 1d)" "# camera 046d:0944
+# MX Brio, profile PROFILE_NAME_DEFAULT
+$OPLUS_LINES
+$OPLUS_NOTES" || return 1
+    expect "what is left out is said on stderr too" "$(cat err)" "$OPLUS_NOTES" || return 1
+    # no camera is needed, and --camera has nothing to choose
+    out2=$(env -u BRIOCTL_FAKE "$BIN" --camera 3 import optionsplus optionsplus.db 2> /dev/null); rc=$?
+    expect "without a camera status" "$rc" 0 || return 1
+    expect "without a camera" "$(printf '%s\n' "$out2" | sed 1d)" "$(printf '%s\n' "$out" | sed 1d)"
+}
+
+t_import_default_path() {
+    dir="$HOME/Library/Application Support/LogiOptionsPlus"
+    out=$("$BIN" import optionsplus 2>&1); rc=$?
+    expect "status without the app" "$rc" 1 || return 1
+    expect "message" "$out" "Logi Options+ settings not found at $dir/settings.db" || return 1
+    mkdir -p "$dir" && cp optionsplus.db "$dir/settings.db" || return 1
+    out=$("$BIN" import optionsplus 2> /dev/null); rc=$?
+    expect "status" "$rc" 0 || return 1
+    expect "the settings" "$(printf '%s\n' "$out" | grep -v '^#')" "$OPLUS_LINES"
+}
+
+t_import_save() {
+    out=$("$BIN" import optionsplus optionsplus.db --save fromapp 2> err); rc=$?
+    expect "status" "$rc" 0 || return 1
+    expect "stdout" "$out" "imported 20 settings to $HOME/.config/brioctl/fromapp" || return 1
+    expect "what is left out is on stderr" "$(cat err)" "$OPLUS_NOTES" || return 1
+    expect "the file" "$(sed 1d "$HOME/.config/brioctl/fromapp")" "$("$BIN" import optionsplus optionsplus.db 2> /dev/null | sed 1d)" || return 1
+    has "profiles lists it" "$("$BIN" profiles)" "  fromapp" || return 1
+    # --save=NAME with a path, and the DB after it
+    out=$("$BIN" import optionsplus --save="$PWD/second" optionsplus.db 2> /dev/null); rc=$?
+    expect "path status" "$rc" 0 || return 1
+    expect "path stdout" "$out" "imported 20 settings to $PWD/second" || return 1
+    expect "path file" "$(sed 1d second)" "$(sed 1d "$HOME/.config/brioctl/fromapp")" || return 1
+    # the name of a built-in preset is refused, as for save, and nothing is written
+    out=$("$BIN" import optionsplus optionsplus.db --save neutral 2>&1); rc=$?
+    expect "preset status" "$rc" 1 || return 1
+    has "preset message" "$out" "neutral is a built-in preset, choose another name" || return 1
+    [ ! -e "$HOME/.config/brioctl/neutral" ] || { echo "# a file called neutral was written"; return 1; }
+    # and nothing is written when the import fails
+    "$BIN" import optionsplus nosuch.db --save never > /dev/null 2>&1; rc=$?
+    expect "failure status" "$rc" 1 || return 1
+    [ ! -e "$HOME/.config/brioctl/never" ] || { echo "# a file was written for a failed import"; return 1; }
+}
+
+t_import_output_applies() {
+    "$BIN" import optionsplus optionsplus.db --save fromapp > /dev/null 2>&1 || return 1
+    # change what the file sets, so that apply has something to write
+    "$BIN" fov 65 zoom 200 warmth 40 tint 30 vibrance 100 expcomp 100 flicker 50 brightness 50 contrast 60 \
+        saturation 70 sharpness 80 priority fps hdr off showmode off micgain 0.5 pan 5 af off awb off > /dev/null || return 1
+    out=$(BRIOCTL_FAKE_TRACE=1 "$BIN" apply fromapp 2> trace); rc=$?
+    expect "apply status" "$rc" 0 || return 1
+    expect "apply prints the settings that were imported" "$out" "$OPLUS_LINES" || return 1
+    expect "registers written" "$(sed -n 's/^fake SET_CUR //p' trace)" "unit $VIDEOPIPE sel 5 01
+unit $VIDEOPIPE sel 13 01
+unit $PU sel 1 0100
+unit $VIDEOPIPE sel 21 3e
+unit $VIDEOPIPE sel 18 32
+unit $VIDEOPIPE sel 20 80
+unit $VIDEOPIPE sel 19 80
+unit $CT sel 11 7300
+unit $CT sel 13 0000000000000000
+unit $CT sel 3 01
+unit $PU sel 5 02
+unit $PU sel 2 8000
+unit $PU sel 3 8000
+unit $PU sel 7 8000
+unit $PU sel 8 8000
+unit $PU sel 11 01
+unit $CT sel 8 01" || return 1
+    has "mic volume" "$(cat trace)" "fake SET_MICGAIN 0.2785" || return 1
+    # all of it is on the camera now
+    got=$(for n in $(printf '%s\n' "$OPLUS_LINES" | cut -d' ' -f1); do echo "$n $("$BIN" get $n)"; done)
+    expect "camera after apply" "$got" "$OPLUS_LINES" || return 1
+    # there is no mic line in the file: the camera microphone is left as it was
+    noline "no mic line" "$(cat "$HOME/.config/brioctl/fromapp")" mic
+}
+
+t_import_errors() {
+    out=$("$BIN" import optionsplus "$PWD/nosuch.db" 2> err); rc=$?
+    expect "missing status" "$rc" 1 || return 1
+    expect "missing stdout" "$out" "" || return 1
+    expect "missing message" "$(cat err)" "Logi Options+ settings not found at $PWD/nosuch.db" || return 1
+    echo "just text" > notdb.db
+    out=$("$BIN" import optionsplus notdb.db 2>&1); rc=$?
+    expect "not a database status" "$rc" 1 || return 1
+    has "not a database message" "$out" "notdb.db is not a SQLite database" || return 1
+    mkdir adir
+    "$BIN" import optionsplus adir > /dev/null 2>&1; rc=$?
+    expect "directory status" "$rc" 1 || return 1
+    for args in "" "logitune" "optionsplus --save" "optionsplus a b" "optionsplus --bogus" "optionsplus --save x --save y"; do
+        "$BIN" import $args > /dev/null 2>&1; rc=$?
+        expect "usage error for '$args'" "$rc" 2 || return 1
+    done
+    has "unknown source" "$("$BIN" import logitune 2>&1)" "unknown source logitune" || return 1
+    has "usage lists import" "$("$BIN" --help)" "brioctl import optionsplus [DB] [--save NAME]"
+}
+
+t_import_no_camera() {
+    oplus_python || return 77
+    mkdb nocam.db 'd["ever_connected_devices"]["devices"] = []' || return 1
+    out=$("$BIN" import optionsplus nocam.db --save x 2>&1); rc=$?
+    expect "status" "$rc" 1 || return 1
+    has "message" "$out" "no camera found in the Logi Options+ settings at nocam.db" || return 1
+    [ ! -e "$HOME/.config/brioctl/x" ] || { echo "# a file was written"; return 1; }
+    # only a headset (no CAMERA entry) is no camera either
+    mkdb headset.db 'd["ever_connected_devices"]["devices"][0]["deviceType"] = "HEADSET"' || return 1
+    "$BIN" import optionsplus headset.db > /dev/null 2>&1; rc=$?
+    expect "headset status" "$rc" 1 || return 1
+    # a camera the profile has no cards for gives nothing to import
+    mkdb nocards.db 'P["assignments"] = []' || return 1
+    out=$("$BIN" import optionsplus nocards.db 2>&1); rc=$?
+    expect "no cards status" "$rc" 1 || return 1
+    has "no cards message" "$out" "nothing to import from the Logi Options+ settings at nocards.db" || return 1
+    mkdb noprofile.db 'd["profile_keys"] = []' || return 1
+    has "no profile message" "$("$BIN" import optionsplus noprofile.db 2>&1)" "no profile found"
+}
+
+t_import_unexpected_schema() {
+    oplus_python || return 77
+    python3 -I - <<'EOF' || return 1
+import sqlite3
+for name, doc in (("nodata.db", None), ("empty.db", ""), ("notjson.db", b"not json at all"),
+                  ("v3.db", b'{"schema_version": 3, "profile_keys": []}')):
+    c = sqlite3.connect(name)
+    if doc is None:
+        c.execute("CREATE TABLE other(a)")
+    else:
+        c.execute("CREATE TABLE data(_id INTEGER PRIMARY KEY, file BLOB NOT NULL)")
+        if doc:
+            c.execute("INSERT INTO data(file) VALUES (?)", (doc,))
+    c.commit()
+EOF
+    for f in nodata empty notjson v3; do
+        out=$("$BIN" import optionsplus $f.db 2>&1); rc=$?
+        expect "$f status" "$rc" 1 || return 1
+        has "$f message" "$out" "$f.db: unexpected layout" || return 1
+    done
+    has "no data table" "$("$BIN" import optionsplus nodata.db 2>&1)" "no such table: data (schema_version unknown, brioctl knows 26)" || return 1
+    has "no document" "$("$BIN" import optionsplus empty.db 2>&1)" "no settings document in the data table" || return 1
+    has "not JSON" "$("$BIN" import optionsplus notjson.db 2>&1)" "the settings document is not JSON" || return 1
+    has "schema version found" "$("$BIN" import optionsplus v3.db 2>&1)" "no list of devices (schema_version 3, brioctl knows 26)" || return 1
+    # another schema version with the layout this knows: imported, with a warning
+    mkdb v27.db 'd["schema_version"] = 27' || return 1
+    out=$("$BIN" import optionsplus v27.db 2> err); rc=$?
+    expect "schema 27 status" "$rc" 0 || return 1
+    expect "schema 27 settings" "$(printf '%s\n' "$out" | grep -v '^#')" "$OPLUS_LINES" || return 1
+    has "schema 27 warning in the file" "$out" "# check: Logi Options+ settings schema 27, brioctl was written for 26" || return 1
+    has "schema 27 warning on stderr" "$(cat err)" "# check: Logi Options+ settings schema 27"
+}
+
+t_import_leaves_the_database_alone() {
+    mkdir ro && cp optionsplus.db ro/settings.db || return 1
+    chmod 444 ro/settings.db && chmod 555 ro
+    trap 'chmod -R u+w ro 2> /dev/null' EXIT
+    before=$(ls -lAT ro; shasum -a 256 ro/settings.db; stat -f '%m %z' ro/settings.db)
+    "$BIN" import optionsplus ro/settings.db > out 2> /dev/null; rc=$?
+    expect "status" "$rc" 0 || return 1
+    expect "settings" "$(grep -vc '^#' out)" 20 || return 1
+    expect "database, its directory and times unchanged" "$(ls -lAT ro; shasum -a 256 ro/settings.db; stat -f '%m %z' ro/settings.db)" "$before" || return 1
+    # the database of a running app: WAL mode, with a -wal file beside it. Nothing is created, changed or locked.
+    oplus_python || return 77
+    chmod u+w ro ro/settings.db
+    python3 -I - <<'EOF' || return 1
+import sqlite3
+c = sqlite3.connect("ro/settings.db")
+assert c.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+c.close()
+assert open("ro/settings.db", "rb").read()[18:20] == b"\x02\x02"
+EOF
+    printf 'frames the app has not written to the database yet' > ro/settings.db-wal
+    chmod 444 ro/settings.db ro/settings.db-wal && chmod 555 ro
+    before=$(ls -lAT ro; shasum -a 256 ro/*; stat -f '%m %z' ro/*)
+    "$BIN" import optionsplus ro/settings.db > out 2> err; rc=$?
+    expect "WAL status" "$rc" 0 || return 1
+    expect "WAL settings" "$(grep -v '^#' out)" "$OPLUS_LINES" || return 1
+    has "the wal is mentioned" "$(cat err)" "settings.db-wal exists" || return 1
+    expect "WAL: nothing created or changed" "$(ls -lAT ro; shasum -a 256 ro/*; stat -f '%m %z' ro/*)" "$before"
+}
+
+t_import_picks_the_camera() {
+    oplus_python || return 77
+    # a second camera, listed first, with cards of its own (its fov is 65): the MX Brio is still the one
+    other='
+import copy
+dev = d["ever_connected_devices"]["devices"]
+cam = copy.deepcopy(dev[0])
+cam["udid"], cam["slotPrefix"] = "091d,11111111111111111111111111111111", "brio-705-091d"
+extra = copy.deepcopy(P["assignments"])
+for a in extra:
+    a["slotId"] = a["slotId"].replace("brio-700-0944", "brio-705-091d")
+    if a["slotId"].endswith("_crop_settings"):
+        for pr in a["card"]["cropSettingsGroup"]["cropPresets"]:
+            pr["cropSettings"]["fov"] = 65
+P["assignments"] += extra
+dev.insert(0, cam)
+'
+    mkdb two.db "$other" || return 1
+    out=$("$BIN" import optionsplus two.db 2> /dev/null)
+    has "MX Brio picked" "$out" "# MX Brio (of 2 cameras in the settings), profile PROFILE_NAME_DEFAULT" || return 1
+    has "its camera line" "$out" "# camera 046d:0944" || return 1
+    has "its fov" "$out" "fov 78" || return 1
+    # no MX Brio: the first camera, and the header says so
+    mkdb first.db "$other
+dev.pop(1)
+" || return 1
+    out=$("$BIN" import optionsplus first.db 2> /dev/null)
+    has "its camera line" "$out" "# camera 046d:091d" || return 1
+    has "its fov" "$out" "fov 65" || return 1
+    has "no MX Brio, one camera" "$out" "# Logitech 091d, profile PROFILE_NAME_DEFAULT" || return 1
+    mkdb first2.db "$other
+dev.pop(1)
+dev.append(copy.deepcopy(dev[0]))
+dev[1]['slotPrefix'] = 'brio-x'
+" || return 1
+    out=$("$BIN" import optionsplus first2.db 2> /dev/null)
+    has "first picked" "$out" "# Logitech 091d (the first of 2 cameras in the settings, no MX Brio), profile PROFILE_NAME_DEFAULT" || return 1
+    # the file names the model it was made for, so apply warns about another one
+    "$BIN" import optionsplus first.db --save other > /dev/null 2>&1 || return 1
+    has "apply warns about another model" "$("$BIN" apply other 2>&1)" "warning: these settings were saved from camera 046d:091d, this is 046d:0944"
+}
+
+t_import_profile_and_preset() {
+    oplus_python || return 77
+    # PROFILE_NAME_DEFAULT wins over an earlier profile; without it the first profile is used
+    two='
+import copy
+q = copy.deepcopy(P)
+q["name"] = "Work"
+for a in q["assignments"]:
+    if a["slotId"].endswith("_crop_settings"):
+        for pr in a["card"]["cropSettingsGroup"]["cropPresets"]:
+            pr["cropSettings"]["fov"] = 65
+d["profile-1"] = q
+d["profile_keys"].insert(0, "profile-1")
+'
+    mkdb prof.db "$two" || return 1
+    out=$("$BIN" import optionsplus prof.db 2> /dev/null)
+    has "default profile" "$out" "fov 78" || return 1
+    has "its name" "$out" "profile PROFILE_NAME_DEFAULT" || return 1
+    mkdb prof2.db "$two
+P['name'] = 'Home'
+" || return 1
+    out=$("$BIN" import optionsplus prof2.db 2> /dev/null)
+    has "first profile" "$out" "fov 65" || return 1
+    has "its name" "$out" "profile Work" || return 1
+    # the preset a card selects; if it names none, the user's own
+    mkdb preset.db 'card("crop")["cropSettingsGroup"]["selectedPresetName"] = "MATISSE_PRESETS_CROP_DEFAULT"' || return 1
+    out=$("$BIN" import optionsplus preset.db 2> /dev/null)
+    has "selected preset" "$out" "fov 90" || return 1
+    has "its zoom" "$out" "zoom 100" || return 1
+    mkdb preset2.db 'card("crop")["cropSettingsGroup"]["selectedPresetName"] = "NO_SUCH_PRESET"' || return 1
+    out=$("$BIN" import optionsplus preset2.db 2> /dev/null)
+    has "user defined preset" "$out" "fov 78" || return 1
+    has "its zoom" "$out" "zoom 115" || return 1
+    mkdb preset3.db '
+g = card("crop")["cropSettingsGroup"]
+g["selectedPresetName"] = "NO_SUCH_PRESET"
+for pr in g["cropPresets"]:
+    pr.pop("userDefined", None)
+' || return 1
+    out=$("$BIN" import optionsplus preset3.db 2>&1)
+    has "no preset" "$out" "# skipped: crop settings (none for this camera in the profile)" || return 1
+    noline "no fov" "$out" fov
+}
+
+t_import_what_it_does_not_trust() {
+    oplus_python || return 77
+    mkdb odd.db '
+sel("camera")["exposure"] = {"mode": "MANUAL", "value": 120}
+sel("camera")["gain"] = {"mode": "MANUAL", "value": 300}
+sel("video")["whiteBalance"] = {"mode": "MANUAL", "value": 4500}
+sel("video").pop("vibrance")
+sel("video").pop("tint")
+sel("camera").pop("hdr")
+sel("crop").pop("showMode")
+sel("crop")["fov"] = 70
+sel("crop")["zoom"] = {"mode": "MANUAL", "value": 500}
+sel("crop")["pan"] = {"mode": "MANUAL", "value": 12}
+sel("crop").pop("tilt")
+sel("crop")["rightsight"]["enabled"] = True
+sel("crop")["videoStabilization"] = True
+sel("focus")["focus"] = {"mode": "MANUAL", "value": 40}
+sel("microphone")["volume"]["gain"] = 1.5
+sel("microphone")["noiseSuppression"] = True
+card("global")["webcamGlobalSettings"]["antiFlicker"] = 0
+' || return 1
+    out=$("$BIN" import optionsplus odd.db 2> err); rc=$?
+    expect "status" "$rc" 0 || return 1
+    for n in ae exposure gain focus af fov zoom pan flicker vibrance tint hdr showmode micgain; do
+        noline "no $n line" "$out" "$n" || return 1
+    done
+    has "tilt is at the centre" "$out" "tilt 0" || return 1
+    has "manual white balance, with a warning" "$out" "awb off
+wb 4500
+# check: wb is taken as kelvin" || return 1
+    for s in "ae, exposure, gain (manual exposure" "af, focus (manual focus" "fov (70 has no equivalent)" \
+        "zoom (500 is outside 100-400)" "pan (value 12 is in units brioctl does not know)" "flicker (0 has no equivalent)" \
+        "vibrance (not in the Logi Options+ settings)" "micgain (no input volume between 0 and 1" \
+        "rightsight (on in Logi Options+" "videoStabilization (no brioctl equivalent)" "noiseSuppression (no brioctl equivalent)"; do
+        has "skipped $s" "$out" "# skipped: $s" || return 1
+    done
+    hasnt "an optional field that is not set is no news" "$out" "# skipped: tint" || return 1
+    hasnt "hdr" "$out" "# skipped: hdr" || return 1
+    hasnt "showmode" "$out" "# skipped: showmode" || return 1
+    has "the warnings are on stderr" "$(cat err)" "# check: wb is taken as kelvin" || return 1
+    # a white balance outside the camera's range is not half imported
+    mkdb wb.db 'sel("video")["whiteBalance"] = {"mode": "MANUAL", "value": 9000}' || return 1
+    out=$("$BIN" import optionsplus wb.db 2> /dev/null)
+    noline "no awb" "$out" awb || return 1
+    noline "no wb" "$out" wb || return 1
+    has "why" "$out" "# skipped: awb, wb (manual white balance 9000 is outside 2800-7500)" || return 1
+    # what is imported is still a settings file apply takes (the fake camera does not link awb to wb: allow wb now)
+    "$BIN" import optionsplus odd.db --save odd > /dev/null 2>&1 || return 1
+    edit_reg "$PU" 10 info 03
+    "$BIN" apply odd > out 2> err; rc=$?
+    expect "apply status" "$rc" 0 || return 1
+    expect "camera white balance" "$("$BIN" get wb)" 4500 || return 1
+    expect "camera awb" "$("$BIN" get awb)" off
+}
+
+t_import_text_from_the_file_is_harmless() {
+    oplus_python || return 77
+    mkdb evil.db '
+sel("crop")["evil\nfov 999"] = 1
+sel("video")["x\rmic off"] = 1
+d["analytics_app_version"] = "2.9\nmic off"
+P["name"] = "A\nmic off"
+' || return 1
+    out=$("$BIN" import optionsplus evil.db 2>&1); rc=$?
+    expect "status" "$rc" 0 || return 1
+    noline "no mic line" "$out" mic || return 1
+    noline "no fov 999" "$out" "fov 999" || return 1
+    bad=$(printf '%s\n' "$out" | grep -vE '^# |^[a-z]+ [-0-9.a-z]+$')
+    expect "every line is a comment or a setting" "$bad" "" || return 1
+    has "the key is shown cut down" "$out" "# skipped: evil?fov 999 (no brioctl equivalent)" || return 1
+    has "the version and the profile too" "$out" "# imported from Logi Options+ 2.9?mic off on " || return 1
+    has "the profile" "$out" ", profile A?mic off"
+}
+
+t_optionsplus_fixture_is_anonymous() {
+    # nothing of an account or a person in the public fixtures
+    for f in "$OPLUS" "$OPLUS_JSON"; do
+        if LC_ALL=C grep -aiE 'token|refresh|access|eyJ|secret|password|passwd|e-?mail|bearer|cookie|session|[A-Za-z0-9._-]+@[A-Za-z0-9.-]+' "$f" > /dev/null; then
+            echo "# $f has something that looks like account data"
+            return 1
+        fi
+        ids=$(LC_ALL=C grep -aoE '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}' "$f" | sort -u)
+        expect "ids in $f" "$ids" "00000000-0000-0000-0000-000000000000" || return 1
+        expect "serial in $f" "$(LC_ALL=C grep -ao 'serialNumber": "[^"]*"' "$f" | sort -u)" 'serialNumber": "XXXXXXXXXXXX"' || return 1
+        hex=$(LC_ALL=C grep -aoE '[0-9a-fA-F]{20,}' "$f" | sort -u | tr -d '0')
+        expect "long hex strings in $f" "$hex" "" || return 1
+    done
+    oplus_python || return 77
+    python3 -I - "$OPLUS" "$OPLUS_JSON" <<'EOF'
+import sqlite3, sys
+c = sqlite3.connect("file:%s?mode=ro&immutable=1" % sys.argv[1], uri=True)
+assert c.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+assert c.execute("PRAGMA freelist_count").fetchone()[0] == 0, "free pages can hold old data"
+assert c.execute("SELECT count(*) FROM data").fetchone()[0] == 1
+assert c.execute("SELECT count(*) FROM snapshots").fetchone()[0] == 0
+assert c.execute("SELECT file FROM data").fetchone()[0] == open(sys.argv[2], "rb").read(), "the .db and the .json differ"
+assert c.execute("SELECT _date_created FROM data").fetchone()[0] == "2000-01-01 00:00:00"
+EOF
+}
+
 # --- run -----------------------------------------------------------------------------------------------------------
 
 N=0
@@ -1139,7 +1573,7 @@ run() {  # run NAME FUNCTION
     N=$((N + 1))
     dir=$ROOT/$N
     if ! { mkdir -p "$dir/home" && cp "$FIXTURE" "$dir/camera.snap" && cp "$GENERIC" "$dir/generic.snap" &&
-        cp "$EXTRA" "$dir/extra.snap" && cp "$BRIO500" "$dir/brio500.snap"; }; then
+        cp "$EXTRA" "$dir/extra.snap" && cp "$BRIO500" "$dir/brio500.snap" && cp "$OPLUS" "$dir/optionsplus.db"; }; then
         echo "not ok $N - $1 (cannot set up)"
         FAILED=$((FAILED + 1))
         return
@@ -1219,6 +1653,19 @@ run "profiles --json lists presets, saved files and the directory" t_profiles_js
 run "watch follows the chosen camera, or waits for the MX Brio" t_watch_target
 run "watch applies to the chosen camera, found again by its ids and serial" t_watch_applies_to_the_chosen_camera
 run "the CoreMediaIO lookup finds nothing for an unknown camera" t_cmio_hook
+run "import optionsplus prints the twenty settings and what it leaves out, with no camera" t_import_sample
+run "import optionsplus reads the default settings.db of Logi Options+" t_import_default_path
+run "import optionsplus --save writes a settings file, refuses preset names, writes nothing on failure" t_import_save
+run "an imported file applies: the registers written, the camera ends with the same values" t_import_output_applies
+run "import optionsplus: missing or damaged database, bad arguments" t_import_errors
+run "import optionsplus: no camera, no cards, no profile" t_import_no_camera
+run "import optionsplus: unexpected layouts name the schema version; another version warns" t_import_unexpected_schema
+run "import optionsplus opens the database read-only and immutable, also in WAL mode" t_import_leaves_the_database_alone
+run "import optionsplus takes the MX Brio first, else the first camera" t_import_picks_the_camera
+run "import optionsplus: the default profile, the selected preset, the user's own as fallback" t_import_profile_and_preset
+run "import optionsplus skips manual exposure and focus, pan, RightSight and warns about wb" t_import_what_it_does_not_trust
+run "import optionsplus: line breaks in the file's text make no lines in the output" t_import_text_from_the_file_is_harmless
+run "the Logi Options+ fixtures hold no account data and the .db equals the .json" t_optionsplus_fixture_is_anonymous
 
 echo "1..$N"
 if [ "$FAILED" -ne 0 ]; then

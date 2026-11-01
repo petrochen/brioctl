@@ -1,0 +1,354 @@
+{
+  "analytics_app_version": "2.9.994631",
+  "dfu/0944,00000000000000000000000000000000/last_update_check": {
+    "fwVersion": "1.1.394",
+    "time": "0"
+  },
+  "ever_connected_devices": {
+    "devices": [
+      {
+        "connectionType": "USB",
+        "deviceModel": "0944_ext2",
+        "deviceType": "CAMERA",
+        "extendedModelId": 2,
+        "firstConnectedTimestamp": "0",
+        "serialNumber": "XXXXXXXXXXXX",
+        "slotPrefix": "brio-700-0944",
+        "udid": "0944,00000000000000000000000000000000"
+      }
+    ]
+  },
+  "profile-00000000-0000-0000-0000-000000000000": {
+    "activeForApplication": true,
+    "applicationId": "00000000-0000-0000-0000-000000000000",
+    "assignments": [
+      {
+        "card": {
+          "attribute": "WEBCAM_CAMERA_SETTINGS",
+          "cameraSettingsGroup": {
+            "cameraPresets": [
+              {
+                "cameraSettings": {
+                  "exposure": {
+                    "mode": "AUTO",
+                    "value": 60
+                  },
+                  "exposureCompensation": 128,
+                  "gain": {
+                    "mode": "MANUAL",
+                    "value": 100
+                  },
+                  "hdr": true,
+                  "priority": "EXPOSURE"
+                },
+                "presetName": "PRESETS_EXPOSURE_MANUAL",
+                "userDefined": true
+              },
+              {
+                "cameraSettings": {
+                  "exposure": {
+                    "mode": "AUTO",
+                    "value": 60
+                  },
+                  "exposureCompensation": 128,
+                  "gain": {
+                    "mode": "MANUAL",
+                    "value": 100
+                  },
+                  "hdr": true,
+                  "priority": "EXPOSURE"
+                },
+                "presetName": "MATISSE_PRESETS_EXPOSURE_DEFAULT"
+              },
+              {
+                "cameraSettings": {
+                  "exposure": {
+                    "mode": "AUTO",
+                    "value": 60
+                  },
+                  "exposureCompensation": 128,
+                  "gain": {
+                    "mode": "MANUAL",
+                    "value": 100
+                  },
+                  "hdr": true,
+                  "priority": "FRAME_RATE"
+                },
+                "presetName": "MATISSE_PRESETS_EXPOSURE_STREAMING"
+              }
+            ],
+            "selectedPresetName": "MATISSE_PRESETS_EXPOSURE_DEFAULT"
+          },
+          "id": "card_global_presets_webcam_camera_settings_0944",
+          "name": "ASSIGNMENT_NAME_WEBCAM_CAMERA_SETTINGS",
+          "tags": [
+            "PRESET_TAG_WEBCAM_CAMERA_SETTINGS"
+          ]
+        },
+        "cardId": "card_global_presets_webcam_camera_settings_0944",
+        "slotId": "brio-700-0944_webcam_camera_settings",
+        "tags": [
+          "UI_WEBCAM_CAMERA_SETTINGS"
+        ]
+      },
+      {
+        "card": {
+          "attribute": "WEBCAM_CROP_SETTINGS",
+          "cropSettingsGroup": {
+            "cropPresets": [
+              {
+                "cropSettings": {
+                  "fov": 78,
+                  "pan": {
+                    "mode": "MANUAL"
+                  },
+                  "rightsight": {
+                    "framingLevel": "LEVEL_NORMAL",
+                    "framingSpeed": "SPEED_NORMAL"
+                  },
+                  "showMode": true,
+                  "tilt": {
+                    "mode": "MANUAL"
+                  },
+                  "zoom": {
+                    "mode": "MANUAL",
+                    "value": 115
+                  }
+                },
+                "presetName": "PRESETS_CROP_MANUAL",
+                "userDefined": true
+              },
+              {
+                "cropSettings": {
+                  "fov": 90,
+                  "pan": {
+                    "mode": "MANUAL"
+                  },
+                  "rightsight": {
+                    "framingLevel": "LEVEL_NORMAL",
+                    "framingSpeed": "SPEED_NORMAL"
+                  },
+                  "showMode": true,
+                  "tilt": {
+                    "mode": "MANUAL"
+                  },
+                  "zoom": {
+                    "mode": "MANUAL",
+                    "value": 100
+                  }
+                },
+                "presetName": "MATISSE_PRESETS_CROP_DEFAULT"
+              },
+              {
+                "cropSettings": {
+                  "fov": 90,
+                  "pan": {
+                    "mode": "MANUAL"
+                  },
+                  "rightsight": {
+                    "enabled": true,
+                    "framingLevel": "LEVEL_NORMAL",
+                    "framingSpeed": "SPEED_NORMAL"
+                  },
+                  "showMode": true,
+                  "tilt": {
+                    "mode": "MANUAL"
+                  },
+                  "zoom": {
+                    "mode": "MANUAL",
+                    "value": 100
+                  }
+                },
+                "presetName": "WEBCAM_PRESETS_AUTO_FRAMING"
+              }
+            ],
+            "persistance": "USER_PERSISTED",
+            "selectedPresetName": "PRESETS_CROP_MANUAL"
+          },
+          "id": "card_global_presets_webcam_crop_settings_0944",
+          "name": "ASSIGNMENT_NAME_WEBCAM_CROP_SETTINGS",
+          "tags": [
+            "PRESET_TAG_WEBCAM_CROP_SETTINGS"
+          ]
+        },
+        "cardId": "card_global_presets_webcam_crop_settings_0944",
+        "slotId": "brio-700-0944_webcam_crop_settings",
+        "tags": [
+          "UI_WEBCAM_CROP_SETTINGS"
+        ]
+      },
+      {
+        "card": {
+          "attribute": "WEBCAM_FOCUS_SETTINGS",
+          "focusSettingsGroup": {
+            "focusPresets": [
+              {
+                "focusSettings": {
+                  "focus": {
+                    "mode": "AUTO"
+                  }
+                },
+                "presetName": "PRESETS_FOCUS_MANUAL",
+                "userDefined": true
+              },
+              {
+                "focusSettings": {
+                  "focus": {
+                    "mode": "AUTO"
+                  }
+                },
+                "presetName": "MATISSE_PRESETS_FOCUS_DEFAULT"
+              }
+            ],
+            "selectedPresetName": "MATISSE_PRESETS_FOCUS_DEFAULT"
+          },
+          "id": "card_global_presets_webcam_focus_settings_0944",
+          "name": "ASSIGNMENT_NAME_WEBCAM_FOCUS_SETTINGS",
+          "tags": [
+            "PRESET_TAG_WEBCAM_FOCUS_SETTINGS"
+          ]
+        },
+        "cardId": "card_global_presets_webcam_focus_settings_0944",
+        "slotId": "brio-700-0944_webcam_focus_settings",
+        "tags": [
+          "UI_WEBCAM_FOCUS_SETTINGS"
+        ]
+      },
+      {
+        "card": {
+          "attribute": "WEBCAM_GLOBAL_SETTINGS",
+          "id": "card_global_presets_webcam_global_settings_0944",
+          "name": "ASSIGNMENT_NAME_WEBCAM_GLOBAL_SETTINGS",
+          "tags": [
+            "PRESET_TAG_WEBCAM_GLOBAL_SETTINGS"
+          ],
+          "webcamGlobalSettings": {
+            "antiFlicker": 60,
+            "stopVideoOnAppFocusLoss": true,
+            "videoPreview": {
+              "preview": true,
+              "resolution": "RES_720p30"
+            }
+          }
+        },
+        "cardId": "card_global_presets_webcam_global_settings_0944",
+        "slotId": "brio-700-0944_webcam_global_settings",
+        "tags": [
+          "UI_WEBCAM_GLOBAL_SETTINGS"
+        ]
+      },
+      {
+        "card": {
+          "attribute": "WEBCAM_MICROPHONE_SETTINGS",
+          "id": "card_global_presets_webcam_microphone_settings_0944",
+          "microphoneSettingsGroup": {
+            "microphonePresets": [
+              {
+                "microphoneSettings": {
+                  "volume": {
+                    "channel": "INPUT",
+                    "gain": 0.278549403
+                  }
+                },
+                "presetName": "WEBCAM_PRESETS_MICROPHONE_MANUAL",
+                "userDefined": true
+              }
+            ],
+            "selectedPresetName": "WEBCAM_PRESETS_MICROPHONE_MANUAL"
+          },
+          "name": "ASSIGNMENT_NAME_WEBCAM_MICROPHONE_SETTINGS",
+          "tags": [
+            "PRESET_TAG_WEBCAM_MICROPHONE_SETTINGS"
+          ]
+        },
+        "cardId": "card_global_presets_webcam_microphone_settings_0944",
+        "slotId": "brio-700-0944_webcam_microphone_settings",
+        "tags": [
+          "UI_WEBCAM_MICROPHONE_SETTINGS"
+        ]
+      },
+      {
+        "card": {
+          "attribute": "WEBCAM_VIDEO_SETTINGS",
+          "id": "card_global_presets_webcam_video_settings_0944",
+          "name": "ASSIGNMENT_NAME_WEBCAM_VIDEO_SETTINGS",
+          "tags": [
+            "PRESET_TAG_WEBCAM_VIDEO_SETTINGS"
+          ],
+          "videoSettingsGroup": {
+            "selectedPresetName": "PRESETS_IMAGE_MANUAL",
+            "videoPresets": [
+              {
+                "presetName": "PRESETS_IMAGE_MANUAL",
+                "userDefined": true,
+                "videoSettings": {
+                  "brightness": {
+                    "mode": "MANUAL",
+                    "value": 128
+                  },
+                  "contrast": {
+                    "mode": "MANUAL",
+                    "value": 128
+                  },
+                  "saturation": {
+                    "mode": "MANUAL",
+                    "value": 128
+                  },
+                  "sharpness": {
+                    "mode": "MANUAL",
+                    "value": 128
+                  },
+                  "tint": 50,
+                  "vibrance": 128,
+                  "whiteBalance": {
+                    "mode": "AUTO",
+                    "value": 5000
+                  },
+                  "whiteBalanceCompensation": 62
+                }
+              },
+              {
+                "presetName": "MATISSE_PRESETS_IMAGE_BW",
+                "videoSettings": {
+                  "brightness": {
+                    "mode": "MANUAL",
+                    "value": 128
+                  },
+                  "contrast": {
+                    "mode": "MANUAL",
+                    "value": 128
+                  },
+                  "saturation": {
+                    "mode": "MANUAL"
+                  },
+                  "sharpness": {
+                    "mode": "MANUAL",
+                    "value": 128
+                  },
+                  "tint": 50,
+                  "vibrance": 128,
+                  "whiteBalance": {
+                    "mode": "AUTO",
+                    "value": 5000
+                  },
+                  "whiteBalanceCompensation": 50
+                }
+              }
+            ]
+          }
+        },
+        "cardId": "card_global_presets_webcam_video_settings_0944",
+        "slotId": "brio-700-0944_webcam_video_settings",
+        "tags": [
+          "UI_WEBCAM_VIDEO_SETTINGS"
+        ]
+      }
+    ],
+    "id": "00000000-0000-0000-0000-000000000000",
+    "name": "PROFILE_NAME_DEFAULT"
+  },
+  "profile_keys": [
+    "profile-00000000-0000-0000-0000-000000000000"
+  ],
+  "schema_version": 26
+}

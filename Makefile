@@ -6,7 +6,8 @@ LABEL = com.github.petrochen.brioctl
 AGENT = $(HOME)/Library/LaunchAgents/$(LABEL).plist
 LOG = $(HOME)/Library/Logs/brioctl.log
 
-LIBS = -framework IOKit -framework CoreFoundation -framework CoreAudio -framework CoreMediaIO
+# sqlite3 is the system library: `import optionsplus` reads Logi Options+'s database with it
+LIBS = -framework IOKit -framework CoreFoundation -framework CoreAudio -framework CoreMediaIO -lsqlite3
 DEFS = -DVERSION=\"$(VERSION)\"
 
 # Release build: one binary for Apple Silicon and Intel, runs on macOS 12 and later.

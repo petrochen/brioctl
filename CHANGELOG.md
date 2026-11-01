@@ -23,6 +23,12 @@
   descriptors are escaped as UTF-8.
 - Snapshots have `device`, `name` and `serial` lines (snapshots from 1.0 still load); `BRIOCTL_FAKE` takes several
   snapshots separated by `:`; `make fixtures` writes the generic and Brio 500 test cameras.
+- `import optionsplus [DB] [--save NAME]` turns the camera settings saved by Logi Options+ (2.9, `settings.db` in
+  `~/Library/Application Support/LogiOptionsPlus`) into a settings file for `apply`: on stdout, or in
+  `~/.config/brioctl/NAME`. It needs no camera and opens the database read-only and immutable, with SQLite's JSON
+  functions (brioctl now links the system `libsqlite3`). Up to twenty settings come from the selected presets;
+  manual exposure and gain, manual focus, pan and tilt away from the centre, RightSight and the app's own options are
+  listed as `# skipped:` lines, manual white balance is taken with a `# check:` line. See the README.
 
 ## 1.0.0 — 2026-11-01
 
