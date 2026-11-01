@@ -1,10 +1,10 @@
-# Draft of the Homebrew formula for the tap petrochen/homebrew-tap (Formula/brioctl.rb).
-# After tagging a release, fill in the checksum: curl -sL <url> | shasum -a 256
+# Copy of Formula/brioctl.rb in petrochen/homebrew-tap. On a new release: update url and sha256
+# (curl -sL <url> | shasum -a 256) here and in the tap.
 class Brioctl < Formula
   desc "Command-line control for the Logitech MX Brio webcam"
   homepage "https://github.com/petrochen/brioctl"
   url "https://github.com/petrochen/brioctl/archive/refs/tags/v1.0.0.tar.gz"
-  sha256 "TODO"
+  sha256 "bdaf844f6029af8e19f991bfe383412ab50b4051b15281bc57c23112fb138b42"
   license "MIT"
 
   depends_on :macos
