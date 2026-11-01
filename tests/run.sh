@@ -92,11 +92,12 @@ import json, sys
 d = json.load(open(sys.argv[1]))
 for key in ("device", "status", "settings", "micgain"):
     assert key in d, "missing " + key
-assert d["device"] == {"model": "MX Brio", "firmware": "1.1.394", "serial": "000000000000", "colour": 2}, d["device"]
+want = {"model": "MX Brio", "firmware": "1.1.394", "serial": "000000000000", "colour": 2}  # the keys of 1.0
+assert all(d["device"][k] == v for k, v in want.items()), d["device"]
 assert d["status"]["video"] == {"on": True, "width": 1920, "height": 1080}
 assert d["status"]["rightsight"]["stored"] is True and d["status"]["led"] is True
 s = d["settings"]
-assert s["fov"] == {"value": "78", "default": "90", "auto": False}, s["fov"]
+assert all(s["fov"][k] == v for k, v in {"value": "78", "default": "90", "auto": False}.items()), s["fov"]
 assert s["zoom"]["value"] == 115 and isinstance(s["zoom"]["value"], int)
 assert s["exposure"]["auto"] is True and s["priority"]["default"] is None
 assert d["micgain"] == 0.2785
@@ -614,6 +615,448 @@ t_camera_survives_writes() {
     expect "listed the same" "$("$BIN" list --json | grep -c GENERIC0001)" 1
 }
 
+# --- cameras other than the MX Brio -----------------------------------------------------------------------------------
+
+t_generic_camera() {
+    export BRIOCTL_FAKE=$PWD/generic.snap
+    out=$("$BIN" 2>&1); rc=$?
+    expect "status" "$rc" 0 || return 1
+    has "name" "$out" "Generic UVC  1234:5678" || return 1
+    has "support level" "$out" "standard UVC controls only" || return 1
+    for name in zoom pan tilt ae exposure brightness backlight flicker wb focus; do
+        matches "$name line" "$out" "^  $name +[^ ]+ +default " || return 1
+    done
+    for name in fov showmode hdr warmth tint vibrance expcomp mic smooth micgain roll iris hue hueauto gamma privacy; do
+        noline "$name is not there" "$out" "$name" || return 1
+    done
+    hasnt "no Logitech group" "$out" "mapped from Logi Tune" || return 1
+    hasnt "no status" "$out" "Status (read-only)" || return 1
+    hasnt "no microphone section" "$out" "Microphone" || return 1
+    has "the camera's own range" "$out" "3-2047" || return 1
+    # the Logitech controls are not here, and nothing is written to an extension unit
+    for name in fov showmode warmth tint mic smooth; do
+        out=$(BRIOCTL_FAKE_TRACE=1 "$BIN" $name 1 2>&1); rc=$?
+        expect "$name status" "$rc" 1 || return 1
+        has "$name message" "$out" "control not found on this camera" || return 1
+        hasnt "$name write" "$out" "fake SET_CUR" || return 1
+    done
+    out=$("$BIN" get fov 2>&1); rc=$?
+    expect "get fov status" "$rc" 1 || return 1
+    has "get fov message" "$out" "control not found on this camera" || return 1
+    "$BIN" get micgain > /dev/null 2>&1; rc=$?
+    expect "get micgain status" "$rc" 1 || return 1
+    "$BIN" micgain 0.5 > /dev/null 2>&1; rc=$?
+    expect "micgain status" "$rc" 1 || return 1
+    out=$(BRIOCTL_FAKE_TRACE=1 "$BIN" factory-reset --yes 2>&1); rc=$?
+    expect "factory-reset status" "$rc" 1 || return 1
+    has "factory-reset message" "$out" "only for the MX Brio" || return 1
+    hasnt "no reset written" "$out" "fake SET_CUR" || return 1
+    # standard controls work
+    expect "brightness" "$("$BIN" brightness 100)" "brightness 100" || return 1
+    expect "read back" "$("$BIN" get brightness)" 100 || return 1
+    hasnt "dump has no extension units" "$("$BIN" dump)" "extension unit"
+}
+
+t_hdr_or_backlight() {
+    # the MX Brio calls it hdr (on/off); both names work
+    expect "hdr" "$("$BIN" hdr off)" "hdr off" || return 1
+    expect "backlight on the MX Brio" "$("$BIN" get backlight)" off || return 1
+    expect "backlight sets it" "$("$BIN" backlight on)" "hdr on" || return 1
+    expect "get hdr" "$("$BIN" get hdr)" on || return 1
+    matches "show says hdr" "$("$BIN" 2>&1)" "^  hdr +on +default on +HDR" || return 1
+    noline "show has no backlight" "$("$BIN" 2>&1)" backlight || return 1
+    # a camera without HDR has a numeric backlight compensation
+    export BRIOCTL_FAKE=$PWD/generic.snap
+    matches "show says backlight" "$("$BIN" 2>&1)" "^  backlight +1 +default 1 +0-1 +backlight compensation" || return 1
+    expect "backlight" "$("$BIN" backlight 0)" "backlight 0" || return 1
+    expect "hdr on a generic camera" "$("$BIN" hdr 1)" "backlight 1" || return 1
+    expect "get hdr" "$("$BIN" get hdr)" 1 || return 1
+    "$BIN" save "$PWD/s" > /dev/null || return 1
+    has "saved as backlight" "$(cat s)" "backlight 1" || return 1
+    noline "not as hdr" "$(cat s)" hdr
+}
+
+t_experimental_camera() {
+    export BRIOCTL_FAKE=$PWD/brio500.snap
+    out=$("$BIN" 2>&1); rc=$?
+    expect "status" "$rc" 0 || return 1
+    has "name" "$out" "Brio 500  046d:0943" || return 1
+    has "the one-line notice" "$out" \
+        "experimental support: reported by other projects, not tested with brioctl; please report with 'brioctl snapshot'" || return 1
+    expect "the notice is one line" "$(printf '%s\n' "$out" | grep -c 'experimental support')" 1 || return 1
+    for name in fov showmode hdr zoom brightness; do
+        matches "$name line" "$out" "^  $name +[^ ]+ +default " || return 1
+    done
+    for name in tint vibrance warmth expcomp mic smooth micgain backlight; do
+        noline "$name is not there" "$out" "$name" || return 1
+    done
+    hasnt "no status" "$out" "Status (read-only)" || return 1
+    # only the field of view and Show Mode are written, with values from the table
+    BRIOCTL_FAKE_TRACE=1 "$BIN" fov 65 > out 2> trace || return 1
+    expect "fov output" "$(cat out)" "fov 65" || return 1
+    expect "fov 65 is the value 2 of Videopipe 5" "$(grep '^fake SET_CUR' trace)" \
+        "fake SET_CUR unit $VIDEOPIPE sel 5 02" || return 1
+    BRIOCTL_FAKE_TRACE=1 "$BIN" fov 90 showmode off 2> trace > /dev/null || return 1
+    expect "fov 90 and Show Mode off" "$(grep -o 'unit [0-9]* sel [0-9]* [0-9a-f]*' trace | tr '\n' ' ')" \
+        "unit $VIDEOPIPE sel 5 00 unit $VIDEOPIPE sel 13 00 " || return 1
+    # the register says 0-255: only the table counts
+    for bad in 3 255 100 -1; do
+        out=$("$BIN" fov $bad 2>&1); rc=$?
+        expect "fov $bad status" "$rc" 1 || return 1
+        has "fov $bad message" "$out" "bad value" || return 1
+    done
+    for name in tint warmth vibrance expcomp mic smooth; do
+        out=$(BRIOCTL_FAKE_TRACE=1 "$BIN" $name 1 2>&1); rc=$?
+        expect "$name status" "$rc" 1 || return 1
+        has "$name message" "$out" "control not found on this camera" || return 1
+        hasnt "$name write" "$out" "fake SET_CUR" || return 1
+    done
+    "$BIN" micgain 0.5 > /dev/null 2>&1; rc=$?
+    expect "micgain status" "$rc" 1 || return 1
+    "$BIN" factory-reset --yes > /dev/null 2>&1; rc=$?
+    expect "factory-reset status" "$rc" 1 || return 1
+    # hdr, as for the MX Brio
+    expect "hdr" "$("$BIN" hdr off)" "hdr off" || return 1
+    # a snapshot has no Logitech-only registers and no microphone
+    "$BIN" snapshot > out.snap || return 1
+    has "device line" "$(cat out.snap)" "device 046d 0943" || return 1
+    noline "no Peripheral registers" "$(grep '^reg' out.snap | sed 's/^reg //')" "$PERIPHERAL" || return 1
+    noline "no micgain" "$(cat out.snap)" micgain
+}
+
+t_logitech_models() {
+    # which models get what: hdr is the name on the 4 models of the table that have it, fov on all of them
+    for row in "0944 hdr" "0943 hdr" "085e hdr" "086b hdr" "0946 backlight" "0919 backlight"; do
+        set -- $row
+        sed "s/^device .*/device 046d $1/" camera.snap > model.snap
+        out=$(BRIOCTL_FAKE=$PWD/model.snap "$BIN" 2>&1) || return 1
+        matches "$1 has fov" "$out" "^  fov +" || return 1
+        matches "$1 calls it $2" "$out" "^  $2 +" || return 1
+    done
+    for pid in 0943 0944; do
+        sed "s/^device .*/device 046d $pid/" camera.snap > model.snap
+        matches "$pid has Show Mode" "$(BRIOCTL_FAKE=$PWD/model.snap "$BIN" 2>&1)" "^  showmode +" || return 1
+    done
+    for pid in 085e 0946 0919 086b; do
+        sed "s/^device .*/device 046d $pid/" camera.snap > model.snap
+        noline "$pid has no Show Mode" "$(BRIOCTL_FAKE=$PWD/model.snap "$BIN" 2>&1)" showmode || return 1
+    done
+    # an unknown Logitech camera, and another vendor's camera that has Logitech's units: standard controls only
+    for dev in "046d 0999" "1234 5678"; do
+        sed "s/^device .*/device $dev/" camera.snap > model.snap
+        out=$(BRIOCTL_FAKE=$PWD/model.snap "$BIN" 2>&1) || return 1
+        has "$dev is standard" "$out" "standard UVC controls only" || return 1
+        noline "$dev has no fov" "$out" fov || return 1
+        out=$(BRIOCTL_FAKE=$PWD/model.snap BRIOCTL_FAKE_TRACE=1 "$BIN" fov 65 showmode off warmth 60 mic off zoom 120 2>&1)
+        expect "$dev: only the standard control is written" \
+            "$(printf '%s\n' "$out" | grep -o 'SET_CUR unit [0-9]* sel [0-9]*')" "SET_CUR unit $CT sel 11" || return 1
+        has "$dev is listed as standard" "$(BRIOCTL_FAKE=$PWD/model.snap "$BIN" list)" standard || return 1
+    done
+}
+
+t_xu_needs_the_set_bit() {
+    edit_reg "$VIDEOPIPE" 5 info 01  # readable only
+    out=$(BRIOCTL_FAKE_TRACE=1 "$BIN" fov 65 2>&1); rc=$?
+    expect "status" "$rc" 1 || return 1
+    has "message" "$out" "does not allow writing" || return 1
+    hasnt "no write" "$out" "fake SET_CUR" || return 1
+    sed "s/^\(reg $VIDEOPIPE 13 \)info 03 /\1/" camera.snap > no-info.snap  # GET_INFO does not answer
+    cp no-info.snap "$BRIOCTL_FAKE"
+    out=$(BRIOCTL_FAKE_TRACE=1 "$BIN" showmode off 2>&1); rc=$?
+    expect "no GET_INFO status" "$rc" 1 || return 1
+    hasnt "no write without GET_INFO" "$out" "fake SET_CUR" || return 1
+    # a standard control that says it is read-only is not written either
+    cp "$FIXTURE" "$BRIOCTL_FAKE"
+    edit_reg "$PU" 2 info 01
+    out=$(BRIOCTL_FAKE_TRACE=1 "$BIN" brightness 100 2>&1); rc=$?
+    expect "read-only status" "$rc" 1 || return 1
+    hasnt "no write" "$out" "fake SET_CUR"
+}
+
+t_dump_unknown_extension_unit() {
+    # the Videopipe unit with a GUID brioctl does not know: nobody knows what reading its registers does
+    sed 's/1502e44934f4fe47b1580e885023e51b/1502e44934f4fe47b1580e885023e51c/' camera.snap > other-guid.snap
+    cmp -s camera.snap other-guid.snap && { echo "# GUID not found in the descriptor"; return 1; }
+    BRIOCTL_FAKE=$PWD/other-guid.snap BRIOCTL_FAKE_TRACE=2 "$BIN" dump > out 2> trace || return 1
+    has "unit is listed" "$(cat out)" "extension unit $VIDEOPIPE  49e40215-f434-47fe-b158-0e885023e51c  unknown" || return 1
+    expect "no value request to it" "$(grep -cE "^fake GET_(CUR|MIN|MAX|RES|DEF) unit $VIDEOPIPE " trace)" 0 || return 1
+    has "but asked what it is" "$(cat trace)" "fake GET_INFO unit $VIDEOPIPE sel 5"
+}
+
+t_standard_controls() {
+    export BRIOCTL_FAKE=$PWD/extra.snap
+    out=$("$BIN" 2>&1) || return 1
+    for name in iris roll privacy hue hueauto gamma; do
+        matches "$name line" "$out" "^  $name +[^ ]+ +default " || return 1
+    done
+    matches "signed range" "$out" "^  hue +0 +default 0 +-1000\.\.1000 " || return 1
+    matches "brightness is signed" "$out" "^  brightness +0 +default 0 +-64\.\.64 " || return 1
+    has "flicker choices" "$out" "anti-flicker, mains frequency in Hz: 50, 60, off, auto" || return 1
+    has "ae choices" "$out" "auto exposure: manual, auto" || return 1
+    # signed values go out as 16-bit two's complement
+    BRIOCTL_FAKE_TRACE=1 "$BIN" hue -10 roll -90 brightness -30 gamma 150 iris 300 > out 2> trace || return 1
+    has "hue" "$(cat trace)" "SET_CUR unit $PU sel 6 f6ff" || return 1
+    has "roll" "$(cat trace)" "SET_CUR unit $CT sel 15 a6ff" || return 1
+    has "brightness" "$(cat trace)" "SET_CUR unit $PU sel 2 e2ff" || return 1
+    has "gamma" "$(cat trace)" "SET_CUR unit $PU sel 9 9600" || return 1
+    has "iris" "$(cat trace)" "SET_CUR unit $CT sel 9 2c01" || return 1
+    expect "hue" "$("$BIN" get hue)" -10 || return 1
+    expect "roll" "$("$BIN" get roll)" -90 || return 1
+    expect "brightness" "$("$BIN" get brightness)" -30 || return 1
+    out=$("$BIN" hue 2000 2>&1); rc=$?
+    expect "hue out of range" "$rc" 1 || return 1
+    has "range in the message" "$out" "out of range (-1000..1000)" || return 1
+    "$BIN" brightness 100 > /dev/null 2>&1; rc=$?
+    expect "brightness out of range" "$rc" 1 || return 1
+    expect "hueauto" "$("$BIN" hueauto on)" "hueauto on" || return 1
+    # privacy is the camera's own shutter state here: it says it cannot be set
+    out=$(BRIOCTL_FAKE_TRACE=1 "$BIN" privacy on 2>&1); rc=$?
+    expect "privacy status" "$rc" 1 || return 1
+    has "privacy message" "$out" "does not allow writing" || return 1
+    hasnt "privacy not written" "$out" "fake SET_CUR" || return 1
+    # the exposure modes this camera lists (manual, auto = 2) and the flicker values of its range
+    BRIOCTL_FAKE_TRACE=1 "$BIN" ae manual > /dev/null 2> trace || return 1
+    has "ae manual" "$(cat trace)" "SET_CUR unit $CT sel 2 01" || return 1
+    BRIOCTL_FAKE_TRACE=1 "$BIN" ae auto > /dev/null 2> trace || return 1
+    has "ae auto is mode 2 here" "$(cat trace)" "SET_CUR unit $CT sel 2 02" || return 1
+    "$BIN" ae shutter > /dev/null 2>&1; rc=$?
+    expect "a mode the camera does not list" "$rc" 1 || return 1
+    BRIOCTL_FAKE_TRACE=1 "$BIN" flicker auto > /dev/null 2> trace || return 1
+    has "flicker auto" "$(cat trace)" "SET_CUR unit $PU sel 5 03" || return 1
+    expect "flicker off" "$("$BIN" flicker off)" "flicker off" || return 1
+    # save and apply round trip
+    "$BIN" save "$PWD/s" > /dev/null || return 1
+    has "saved hue" "$(cat s)" "hue -10" || return 1
+    has "saved flicker" "$(cat s)" "flicker off" || return 1
+    "$BIN" hue 5 flicker 50 > /dev/null || return 1
+    "$BIN" apply "$PWD/s" > /dev/null || return 1
+    expect "applied hue" "$("$BIN" get hue)" -10 || return 1
+    # the MX Brio has none of these, and its exposure mode is 8
+    export BRIOCTL_FAKE=$PWD/camera.snap
+    "$BIN" hue 5 > /dev/null 2>&1; rc=$?
+    expect "hue on the MX Brio" "$rc" 1 || return 1
+    "$BIN" flicker off > /dev/null 2>&1; rc=$?
+    expect "flicker off on the MX Brio" "$rc" 1 || return 1
+    BRIOCTL_FAKE_TRACE=1 "$BIN" ae manual ae auto > /dev/null 2> trace || return 1
+    has "ae auto is mode 8 on the MX Brio" "$(cat trace)" "SET_CUR unit $CT sel 2 08"
+}
+
+t_defaults_any_camera() {
+    export BRIOCTL_FAKE=$PWD/generic.snap
+    "$BIN" brightness 100 contrast 90 > /dev/null || return 1
+    BRIOCTL_FAKE_TRACE=1 "$BIN" defaults > out 2> trace; rc=$?
+    expect "status" "$rc" 0 || return 1
+    # zoom 115 and flicker 50 were not the defaults either; exposure, gain, wb and focus are driven by auto modes
+    expect "what was written" "$(grep -o 'unit [0-9]* sel [0-9]*' trace | sort | tr '\n' ' ')" \
+        "unit $CT sel 11 unit $PU sel 2 unit $PU sel 3 unit $PU sel 5 " || return 1
+    expect "brightness" "$("$BIN" get brightness)" 128 || return 1
+    expect "flicker" "$("$BIN" get flicker)" 60 || return 1
+    # the experimental model: the field of view too, but not Show Mode
+    export BRIOCTL_FAKE=$PWD/brio500.snap
+    "$BIN" fov 65 showmode off > /dev/null || return 1
+    "$BIN" defaults > out || return 1
+    has "fov default" "$(cat out)" "fov 90" || return 1
+    hasnt "showmode untouched" "$(cat out)" showmode || return 1
+    expect "showmode" "$("$BIN" get showmode)" off
+}
+
+t_save_names_the_camera() {
+    "$BIN" save "$PWD/s" > /dev/null || return 1
+    expect "first line" "$(sed -n 1p s | cut -c1-17)" "# brioctl setting" || return 1
+    expect "camera line" "$(sed -n 2p s)" "# camera 046d:0944 000000000000" || return 1
+    # no warning on the same model
+    out=$("$BIN" apply "$PWD/s" 2>&1); rc=$?
+    expect "same model status" "$rc" 0 || return 1
+    hasnt "no warning" "$out" warning || return 1
+    # another model: a warning, not a failure
+    printf '# camera 046d:0944 ABC\nzoom 140\nbrightness 100\n' > other
+    export BRIOCTL_FAKE=$PWD/generic.snap
+    out=$("$BIN" apply "$PWD/other" 2>&1); rc=$?
+    expect "status" "$rc" 0 || return 1
+    has "warning" "$out" \
+        "warning: these settings were saved from camera 046d:0944, this is 1234:5678 (Generic UVC)" || return 1
+    expect "the settings that fit are applied" "$("$BIN" get zoom)" 140 || return 1
+    "$BIN" save "$PWD/g" > /dev/null || return 1
+    expect "generic camera line" "$(sed -n 2p g)" "# camera 1234:5678 000000000000" || return 1
+    printf '# camera 1234:5678\nzoom 150\n' > noserial
+    out=$("$BIN" apply "$PWD/noserial" 2>&1) || return 1
+    hasnt "no serial in the line is fine" "$out" warning || return 1
+    # a file without the line (saved by 1.0) and a preset: nothing to warn about
+    printf 'zoom 160\n' > old
+    out=$("$BIN" apply "$PWD/old" 2>&1) || return 1
+    hasnt "old file" "$out" warning || return 1
+    out=$("$BIN" apply warmer 2>&1)
+    hasnt "preset" "$out" "saved from"
+}
+
+t_other_snapshots_round_trip() {
+    export BRIOCTL_FAKE=$PWD/generic.snap
+    "$BIN" snapshot > out.snap || return 1
+    grep -v '^#' generic.snap | sort > want
+    grep -v '^#' out.snap | sort > got
+    cmp -s want got || { echo "# snapshot of the generic camera differs from the fixture"; diff want got | head -5; return 1; }
+    BRIOCTL_FAKE=$PWD/extra.snap "$BIN" snapshot > out.snap || return 1
+    grep -v '^#' extra.snap | sort > want
+    grep -v '^#' out.snap | sort > got
+    cmp -s want got || { echo "# snapshot of the extra camera differs from the fixture"; diff want got | head -5; return 1; }
+    BRIOCTL_FAKE=$PWD/brio500.snap "$BIN" snapshot > out.snap || return 1
+    has "device line" "$(cat out.snap)" "device 046d 0943" || return 1
+    has "header" "$(head -1 out.snap)" "firmware 1.1.394"
+}
+
+t_fixtures_are_generated() {
+    command -v python3 > /dev/null 2>&1 || { echo "# python3 not available"; return 77; }
+    mkdir fx && cp "$HERE/make-fixtures.py" "$HERE/mxbrio-1.1.394.snap" fx/ || return 1
+    python3 -I fx/make-fixtures.py > /dev/null || return 1
+    for f in generic-uvc generic-uvc-extra brio500-sim; do
+        cmp -s "fx/$f.snap" "$HERE/$f.snap" || { echo "# $f.snap is not what make-fixtures.py writes (make fixtures)"; return 1; }
+    done
+    # the generic camera really has no extension unit and a consistent descriptor
+    python3 -I - generic.snap <<'EOF'
+import sys
+line = [l for l in open(sys.argv[1]) if l.startswith("descriptor ")][0].split()[1]
+d = bytes.fromhex(line)
+assert d[2] | d[3] << 8 == len(d), "wTotalLength"
+i, vc, total, header = 0, False, 0, None
+while i < len(d):
+    n = d[i]
+    if d[i + 1] == 4:
+        vc = d[i + 5] == 14 and d[i + 6] == 1
+    elif vc and d[i + 1] == 0x24:
+        total += n
+        assert d[i + 2] != 6, "an extension unit is left"
+        if d[i + 2] == 1:
+            header = d[i + 5] | d[i + 6] << 8
+    i += n
+assert header == total, (header, total)
+EOF
+}
+
+# --- --json for the GUI ----------------------------------------------------------------------------------------------
+
+t_json_contract() {
+    python3 -I -c pass >/dev/null 2>&1 || { echo "# python3 not available"; return 77; }
+    "$BIN" --json > out.json || return 1
+    python3 -I - out.json <<'EOF' || return 1
+import json, sys
+d = json.load(open(sys.argv[1]))
+dev = d["device"]
+want = {"vid": "046d", "pid": "0944", "model": "MX Brio", "support": "full", "index": 1, "location": "0x100000"}
+assert all(dev[k] == v for k, v in want.items()), dev
+s = d["settings"]
+assert {v["group"] for v in s.values()} == {"Logitech", "Framing", "Exposure and image", "Found in the firmware"}
+for name, v in s.items():
+    assert v["kind"] in ("choice", "bool", "number"), (name, v)
+    assert isinstance(v["writable"], bool) and isinstance(v["help"], str) and v["help"], (name, v)
+    assert ("choices" in v) == (v["kind"] == "choice"), (name, v)
+    assert all((k in v) == (v["kind"] == "number") for k in ("min", "max", "step")), (name, v)
+# a number: the camera's range and step, scaled like the value
+z = s["zoom"]
+assert (z["kind"], z["min"], z["max"], z["step"], z["group"], z["writable"]) == ("number", 100, 400, 1, "Framing", True), z
+assert (s["pan"]["min"], s["pan"]["max"], s["pan"]["step"]) == (-20, 20, 1), s["pan"]
+assert (s["exposure"]["min"], s["exposure"]["max"]) == (3, 2047), s["exposure"]
+assert (s["warmth"]["min"], s["warmth"]["max"], s["warmth"]["group"]) == (0, 100, "Logitech"), s["warmth"]
+# a choice: the names it accepts
+f = s["fov"]
+assert (f["kind"], f["choices"], f["group"], f["writable"]) == ("choice", ["90", "78", "65"], "Logitech", True), f
+assert f["help"] == "field of view in degrees: 90, 78, 65", f["help"]
+assert s["ae"]["choices"] == ["auto", "manual"] and s["flicker"]["choices"] == ["50", "60"], (s["ae"], s["flicker"])
+assert s["priority"]["choices"] == ["fps", "exposure"], s["priority"]
+# a bool
+b = s["showmode"]
+assert (b["kind"], b["value"], b["writable"]) == ("bool", "on", True) and "choices" not in b, b
+assert s["awb"]["kind"] == "bool" and s["hdr"]["kind"] == "bool" and s["mic"]["kind"] == "bool"
+# not writable now: driven by an auto mode
+for name in ("exposure", "gain", "wb", "focus"):
+    assert s[name]["auto"] is True and s[name]["writable"] is False, (name, s[name])
+assert s["brightness"]["auto"] is False and s["brightness"]["writable"] is True
+EOF
+}
+
+t_json_other_cameras() {
+    python3 -I -c pass >/dev/null 2>&1 || { echo "# python3 not available"; return 77; }
+    BRIOCTL_FAKE=$PWD/generic.snap "$BIN" --json > generic.json || return 1
+    BRIOCTL_FAKE=$PWD/brio500.snap "$BIN" --json > brio500.json || return 1
+    BRIOCTL_FAKE=$PWD/extra.snap "$BIN" --json > extra.json || return 1
+    python3 -I - generic.json brio500.json extra.json <<'EOF' || return 1
+import json, sys
+g, b, x = (json.load(open(f)) for f in sys.argv[1:4])
+dev = g["device"]
+assert (dev["vid"], dev["pid"], dev["model"], dev["support"], dev["name"], dev["index"]) == \
+    ("1234", "5678", None, "standard", "Generic UVC", 1), dev
+assert dev["firmware"] is None and dev["colour"] is None and dev["serial"] == "000000000000", dev
+assert g["micgain"] is None and g["status"]["video"] is None and g["status"]["led"] is None
+s = g["settings"]
+assert not {"fov", "showmode", "hdr", "warmth", "tint", "vibrance", "expcomp", "mic", "smooth"} & set(s), sorted(s)
+assert {v["group"] for v in s.values()} == {"Framing", "Exposure and image"}
+assert s["backlight"]["kind"] == "number" and (s["backlight"]["min"], s["backlight"]["max"]) == (0, 1), s["backlight"]
+dev = b["device"]
+assert (dev["vid"], dev["pid"], dev["model"], dev["support"]) == ("046d", "0943", "Brio 500", "experimental"), dev
+s = b["settings"]
+assert {"fov", "showmode", "hdr"} <= set(s) and not {"tint", "warmth", "vibrance", "expcomp", "mic", "smooth", "backlight"} & set(s)
+assert b["micgain"] is None
+s = x["settings"]
+assert (s["roll"]["min"], s["roll"]["max"]) == (-180, 180), s["roll"]
+assert (s["brightness"]["min"], s["brightness"]["max"]) == (-64, 64), s["brightness"]
+assert s["ae"]["choices"] == ["manual", "auto"] and s["flicker"]["choices"] == ["50", "60", "off", "auto"], s
+assert s["privacy"]["kind"] == "bool" and s["privacy"]["writable"] is False, s["privacy"]
+assert s["hueauto"]["kind"] == "bool" and s["hue"]["kind"] == "number" and s["gamma"]["min"] == 100
+EOF
+}
+
+t_json_errors_are_text() {
+    three_cameras
+    BRIOCTL_FAKE=$PWD/generic.snap:$PWD/extra.snap
+    out=$("$BIN" --json 2>/dev/null); rc=$?
+    expect "several cameras status" "$rc" 2 || return 1
+    expect "nothing on stdout" "$out" "" || return 1
+    has "text on stderr" "$("$BIN" --json 2>&1 > /dev/null)" "several cameras: choose one with --camera" || return 1
+    out=$("$BIN" --camera 9 --json 2>/dev/null); rc=$?
+    expect "bad camera status" "$rc" 2 || return 1
+    expect "bad camera stdout" "$out" "" || return 1
+    BRIOCTL_FAKE=: out=$("$BIN" --json 2>/dev/null); rc=$?
+    expect "no camera status" "$rc" 1 || return 1
+    expect "no camera stdout" "$out" "" || return 1
+    has "no camera stderr" "$(BRIOCTL_FAKE=: "$BIN" --json 2>&1)" "no UVC camera found"
+}
+
+t_profiles_json() {
+    want='{"presets":[{"name":"neutral","settings":{"warmth":"50","saturation":"128"}},'
+    want="$want"'{"name":"warmer","settings":{"warmth":"60"}},{"name":"cooler","settings":{"warmth":"40"}},'
+    want="$want"'{"name":"bw","settings":{"saturation":"0"}},{"name":"standard","settings":{"priority":"exposure"}},'
+    want="$want"'{"name":"streaming","settings":{"priority":"fps"}},{"name":"colorboost","settings":{"saturation":"255"}}],'
+    expect "no saved files" "$("$BIN" profiles --json)" "$want\"saved\":[],\"dir\":\"$HOME/.config/brioctl\"}" || return 1
+    "$BIN" save > /dev/null || return 1
+    "$BIN" save meeting > /dev/null || return 1
+    expect "saved files, sorted" "$("$BIN" profiles --json)" \
+        "$want\"saved\":[\"meeting\",\"settings\"],\"dir\":\"$HOME/.config/brioctl\"}" || return 1
+    # names are escaped
+    : > "$HOME/.config/brioctl/we\"ird"
+    : > "$HOME/.config/brioctl/caf$(printf '\303\251')"
+    : > "$HOME/.config/brioctl/.hidden"
+    out=$("$BIN" profiles --json)
+    has "quote escaped" "$out" 'we\"ird' || return 1
+    has "utf-8 as a \u escape" "$out" 'caf\u00e9' || return 1
+    hasnt "no dot files" "$out" hidden || return 1
+    if python3 -I -c pass >/dev/null 2>&1; then
+        printf '%s\n' "$out" | python3 -I -c '
+import json, os, sys
+d = json.load(sys.stdin)
+assert d["dir"] == os.path.expanduser("~/.config/brioctl") and d["dir"].startswith("/"), d["dir"]
+assert d["saved"] == sorted(d["saved"]) and "café" in d["saved"] and "meeting" in d["saved"], d["saved"]
+assert d["presets"][1] == {"name": "warmer", "settings": {"warmth": "60"}}
+' || return 1
+    fi
+    # the text form is still there
+    out=$("$BIN" profiles)
+    has "presets" "$out" "warmer     warmth 60" || return 1
+    has "saved" "$out" "  meeting" || return 1
+    "$BIN" profiles extra > /dev/null 2>&1; rc=$?
+    expect "bad argument" "$rc" 2 || return 1
+    # profiles needs no camera
+    BRIOCTL_FAKE=: "$BIN" profiles --json > /dev/null
+}
+
 # --- run -----------------------------------------------------------------------------------------------------------
 
 N=0
@@ -685,6 +1128,21 @@ run "without --camera: the only camera, or the only known one, else exit 2" t_de
 run "--camera takes an index, a serial number or a location, for every command" t_camera_option
 run "snapshot writes the device, name and masked serial; old snapshots are MX Brios" t_snapshot_device_lines
 run "writes keep the device lines of a fake camera" t_camera_survives_writes
+run "a generic camera: standard controls only, backlight, no Logitech writes" t_generic_camera
+run "hdr and backlight are one control with two names" t_hdr_or_backlight
+run "an experimental model gets the field of view, Show Mode and hdr only" t_experimental_camera
+run "models: fov, Show Mode, hdr or backlight as the table says; unknown ones get none" t_logitech_models
+run "extension unit writes need the SET bit" t_xu_needs_the_set_bit
+run "dump does not read the registers of an unknown extension unit" t_dump_unknown_extension_unit
+run "hue, gamma, iris, roll, privacy, signed ranges, exposure modes of another camera" t_standard_controls
+run "defaults works for any camera" t_defaults_any_camera
+run "save names the camera and apply warns about another model" t_save_names_the_camera
+run "snapshots of the other fixtures equal the fixtures" t_other_snapshots_round_trip
+run "the fixtures are what make-fixtures.py writes" t_fixtures_are_generated
+run "--json: group, writable, kind, min, max, step, choices and help for the GUI" t_json_contract
+run "--json of a generic, an experimental and another camera" t_json_other_cameras
+run "errors with --json are text on stderr and a non-zero exit" t_json_errors_are_text
+run "profiles --json lists presets, saved files and the directory" t_profiles_json
 
 echo "1..$N"
 if [ "$FAILED" -ne 0 ]; then

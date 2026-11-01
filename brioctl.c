@@ -65,7 +65,7 @@ enum { INFO_GET = 0x01, INFO_SET = 0x02, INFO_AUTO = 0x04 };  // GET_INFO bits; 
 enum { DESC_INTERFACE = 0x04, DESC_CS_INTERFACE = 0x24 };
 enum { VC_INPUT_TERMINAL = 0x02, VC_PROCESSING_UNIT = 0x05, VC_EXTENSION_UNIT = 0x06, ITT_CAMERA = 0x0201 };
 enum { U_CT, U_PU, U_VIDEOPIPE, U_PERIPHERAL, U_INFO, U_STATS, U_APP, U_COUNT };
-enum { CT_ZOOM = 0x0b, CT_PANTILT = 0x0d };
+enum { CT_AE_MODE = 0x02, CT_ZOOM = 0x0b, CT_PANTILT = 0x0d };
 
 // Logitech models whose extension-unit controls brioctl knows. "full" is the camera brioctl was built on and tested
 // with. "experimental" gets only what other projects confirm (cameractrls: field of view on all of them; OpenLogi issue
@@ -109,53 +109,66 @@ typedef struct {
 
 typedef struct { const char *name; long raw; } Map;  // what the user types and sees <-> register value
 
+// Several names for one value are fine (the first is the one shown). A name can come twice with different values: the
+// first one the camera accepts is used (auto exposure is 8 on Logitech cameras and 2 on most others).
 static const Map ON_OFF[] = {{"on", 1}, {"off", 0}, {"1", 1}, {"0", 0}, {NULL, 0}};
 static const Map FOV_MAP[] = {{"90", 0}, {"78", 1}, {"65", 2}, {NULL, 0}};
-static const Map FLICKER_MAP[] = {{"50", 1}, {"60", 2}, {NULL, 0}};
+static const Map FLICKER_MAP[] = {{"50", 1}, {"60", 2}, {"off", 0}, {"auto", 3}, {NULL, 0}};
 static const Map PRIORITY_MAP[] = {{"fps", 0}, {"exposure", 1}, {NULL, 0}};
-static const Map AE_MAP[] = {{"auto", 8}, {"manual", 1}, {NULL, 0}};
+static const Map AE_MAP[] = {{"auto", 8}, {"manual", 1}, {"auto", 2}, {"shutter", 4}, {NULL, 0}};
 
 typedef struct {
-    const char *name, *help;  // name NULL: a group heading
+    const char *name, *help;  // name NULL: a group heading (help is its title)
     int unit, sel, len;       // where the control lives and its size in bytes
     const Map *map;           // named values; NULL means a plain number
     int off, size;            // field inside the control (pan and tilt share one); size 0 = whole control
     int scale;                // register value = number * scale; 0 means 1
     int sgn;                  // field is signed
+    int need;                 // F_* the camera's model must have: Logitech controls; F_NOHDR: the backlight name
+    const char *group;        // headings: the name of the group in JSON
 } Ctrl;
 
-// Order matters for save and apply: auto modes come before the values they gate.
+// What is written about a control: the names of its values are added after a colon (or where the help has "%s"), a
+// numeric control's range comes from the camera. Order matters for save and apply: auto modes come before the values
+// they gate. Standard controls are shown when the camera declares them, Logitech ones when the model gets them (MODELS).
 static const Ctrl CTRLS[] = {
-    {NULL, "Logitech (mapped from Logi Tune)"},
-    {"fov",        "field of view in degrees: 90, 78, 65",                U_VIDEOPIPE,  0x05, 1, FOV_MAP},
-    {"showmode",   "Show Mode, flip the picture when tilted to the desk", U_VIDEOPIPE,  0x0d, 1, ON_OFF},
-    {"hdr",        "HDR (UVC backlight compensation): on, off",           U_PU,         0x01, 2, ON_OFF},
-    {"warmth",     "white balance warmth: 0-100, 50 = neutral",           U_VIDEOPIPE,  0x15, 1},
-    {"tint",       "tint: 0-100, 50 = neutral",                           U_VIDEOPIPE,  0x12, 1},
-    {"vibrance",   "vibrance: 0-255, 128 = neutral",                      U_VIDEOPIPE,  0x14, 1},
-    {"expcomp",    "exposure compensation: 0-255, 128 = neutral",         U_VIDEOPIPE,  0x13, 1},
-    {"mic",        "camera microphone: on, off (camera restarts on change)", U_PERIPHERAL, 0x10, 1, ON_OFF},
-    {NULL, "Framing"},
-    {"zoom",       "digital zoom: 100 = 1x ... 400 = 4x",                 U_CT, CT_ZOOM, 2},
-    {"pan",        "move the zoomed frame, degrees: -20...20",            U_CT, CT_PANTILT, 8, NULL, 0, 4, 3600, 1},
-    {"tilt",       "move the zoomed frame, degrees: -20...20",            U_CT, CT_PANTILT, 8, NULL, 4, 4, 3600, 1},
-    {NULL, "Exposure and image (standard UVC)"},
-    {"priority",   "in low light keep: fps, exposure",                    U_CT, 0x03, 1, PRIORITY_MAP},
-    {"ae",         "auto exposure: auto, manual",                         U_CT, 0x02, 1, AE_MAP},
-    {"exposure",   "exposure time in 100 us units: 3-2047 (ae manual)",   U_CT, 0x04, 4},
-    {"gain",       "gain: 0-255 (ae manual)",                             U_PU, 0x04, 2},
-    {"flicker",    "anti-flicker, mains frequency in Hz: 50, 60",         U_PU, 0x05, 1, FLICKER_MAP},
-    {"brightness", "brightness: 0-255",                                   U_PU, 0x02, 2},
-    {"contrast",   "contrast: 0-255",                                     U_PU, 0x03, 2},
-    {"saturation", "saturation: 0-255",                                   U_PU, 0x07, 2},
-    {"sharpness",  "sharpness: 0-255",                                    U_PU, 0x08, 2},
-    {"awb",        "auto white balance: on, off",                         U_PU, 0x0b, 1, ON_OFF},
-    {"wb",         "white balance in kelvin: 2800-7500 (awb off)",        U_PU, 0x0a, 2},
-    {"af",         "autofocus: on, off",                                  U_CT, 0x08, 1, ON_OFF},
-    {"focus",      "focus: 0-255 (af off)",                               U_CT, 0x06, 2},
-    {NULL, "Found in the firmware, not used by Logitech's apps"},
+    {NULL, "Logitech (mapped from Logi Tune)", .group = "Logitech"},
+    {"fov",        "field of view in degrees",                            U_VIDEOPIPE,  0x05, 1, FOV_MAP, .need = F_FOV},
+    {"showmode",   "Show Mode (flip the picture when tilted to the desk)", U_VIDEOPIPE, 0x0d, 1, ON_OFF, .need = F_SHOW},
+    {"hdr",        "HDR (UVC backlight compensation)",                    U_PU,         0x01, 2, ON_OFF, .need = F_HDR},
+    {"warmth",     "white balance warmth, 50 = neutral",                  U_VIDEOPIPE,  0x15, 1, .need = F_FULL},
+    {"tint",       "tint, 50 = neutral",                                  U_VIDEOPIPE,  0x12, 1, .need = F_FULL},
+    {"vibrance",   "vibrance, 128 = neutral",                             U_VIDEOPIPE,  0x14, 1, .need = F_FULL},
+    {"expcomp",    "exposure compensation, 128 = neutral",                U_VIDEOPIPE,  0x13, 1, .need = F_FULL},
+    {"mic",        "camera microphone%s (camera restarts on change)",     U_PERIPHERAL, 0x10, 1, ON_OFF, .need = F_FULL},
+    {NULL, "Framing", .group = "Framing"},
+    {"zoom",       "zoom, 100 = 1x on Logitech cameras",                  U_CT, CT_ZOOM, 2},
+    {"pan",        "move the zoomed frame, in degrees",                   U_CT, CT_PANTILT, 8, NULL, 0, 4, 3600, 1},
+    {"tilt",       "move the zoomed frame, in degrees",                   U_CT, CT_PANTILT, 8, NULL, 4, 4, 3600, 1},
+    {"roll",       "rotate the picture, in degrees",                      U_CT, 0x0f, 2, NULL, 0, 0, 0, 1},
+    {NULL, "Exposure and image (standard UVC)", .group = "Exposure and image"},
+    {"priority",   "in low light keep",                                   U_CT, 0x03, 1, PRIORITY_MAP},
+    {"ae",         "auto exposure",                                       U_CT, CT_AE_MODE, 1, AE_MAP},
+    {"exposure",   "exposure time in 100 us units (ae manual)",           U_CT, 0x04, 4},
+    {"iris",       "iris, f-number x 100",                                U_CT, 0x09, 2},
+    {"gain",       "gain",                                                U_PU, 0x04, 2},
+    {"backlight",  "backlight compensation",                              U_PU, 0x01, 2, .need = F_NOHDR},
+    {"flicker",    "anti-flicker, mains frequency in Hz",                 U_PU, 0x05, 1, FLICKER_MAP},
+    {"brightness", "brightness",                                          U_PU, 0x02, 2, NULL, 0, 0, 0, 1},
+    {"contrast",   "contrast",                                            U_PU, 0x03, 2},
+    {"hueauto",    "automatic hue",                                       U_PU, 0x10, 1, ON_OFF},
+    {"hue",        "hue (hueauto off)",                                   U_PU, 0x06, 2, NULL, 0, 0, 0, 1},
+    {"saturation", "saturation",                                          U_PU, 0x07, 2},
+    {"sharpness",  "sharpness",                                           U_PU, 0x08, 2},
+    {"gamma",      "gamma",                                               U_PU, 0x09, 2},
+    {"awb",        "auto white balance",                                  U_PU, 0x0b, 1, ON_OFF},
+    {"wb",         "white balance in kelvin (awb off)",                   U_PU, 0x0a, 2},
+    {"af",         "autofocus",                                           U_CT, 0x08, 1, ON_OFF},
+    {"focus",      "focus (af off)",                                      U_CT, 0x06, 2},
+    {"privacy",    "privacy shutter",                                     U_CT, 0x11, 1, ON_OFF},
+    {NULL, "Found in the firmware, not used by Logitech's apps", .group = "Found in the firmware"},
     // Peripheral 3 also holds a speed (u16, 10-100); 10, 50 and 100 gave the same 3 s glide, so it is not offered.
-    {"smooth",     "glide to new zoom and pan in about 3 s: on, off",     U_PERIPHERAL, 0x03, 3, ON_OFF, 0, 1},
+    {"smooth",     "glide to new zoom and pan in about 3 s",              U_PERIPHERAL, 0x03, 3, ON_OFF, 0, 1, .need = F_FULL},
 };
 #define NCTRLS (int)(sizeof CTRLS / sizeof *CTRLS)
 
@@ -785,6 +798,26 @@ static long scaleOf(const Ctrl *k) { return k->scale ? k->scale : 1; }
 static int isXUnit(int unit) { return unit != U_CT && unit != U_PU; }  // by U_*
 static int isXU(const Ctrl *k) { return isXUnit(k->unit); }
 
+// The standard controls a camera can declare, with the bit of each in the bmControls of its camera terminal (U_CT) or
+// processing unit (U_PU): UVC 1.5 tables 3-6 and 3-8. The bit numbers do not follow the selectors.
+static const struct { int unit, sel, bit; } STD_BITS[] = {
+    {U_CT, 0x02, 1}, {U_CT, 0x03, 2}, {U_CT, 0x04, 3}, {U_CT, 0x06, 5}, {U_CT, 0x09, 7},
+    {U_CT, 0x0b, 9}, {U_CT, 0x0d, 11}, {U_CT, 0x0f, 13}, {U_CT, 0x08, 17}, {U_CT, 0x11, 18},
+    {U_PU, 0x02, 0}, {U_PU, 0x03, 1}, {U_PU, 0x06, 2}, {U_PU, 0x07, 3}, {U_PU, 0x08, 4}, {U_PU, 0x09, 5},
+    {U_PU, 0x0a, 6}, {U_PU, 0x01, 8}, {U_PU, 0x04, 9}, {U_PU, 0x05, 10}, {U_PU, 0x10, 11}, {U_PU, 0x0b, 12},
+};
+
+// Does the camera have this control? A standard one if its camera terminal or processing unit declares it. A Logitech
+// one if the model has it (MODELS) and the camera has the unit: nothing else is ever written to an extension unit.
+static int avail(const Cam *c, const Ctrl *k) {
+    if (!k->name || !c->unit[k->unit]) return 0;
+    if (k->need && (c->feat & k->need) != k->need) return 0;
+    if (isXU(k)) return 1;
+    for (size_t i = 0; i < sizeof STD_BITS / sizeof *STD_BITS; i++)
+        if (STD_BITS[i].unit == k->unit && STD_BITS[i].sel == k->sel) return c->bm[k->unit == U_PU] >> STD_BITS[i].bit & 1;
+    return 0;
+}
+
 // One field of a control, read with GET_CUR, GET_MIN, GET_MAX or GET_DEF.
 static IOReturn getField(Cam *c, const Ctrl *k, int req, long *out) {
     uint8_t b[8] = {0};
@@ -826,10 +859,44 @@ static int setMicGain(const char *arg) {
     return 0;
 }
 
-static int parseValue(const Ctrl *k, const char *arg, long *raw) {
+// GET_MIN, GET_MAX and GET_RES of a control, in register units; has* says whether the camera answered.
+typedef struct { int hasMin, hasMax, hasRes; long min, max, res; } Range;
+
+static void getRange(Cam *c, const Ctrl *k, Range *r) {
+    memset(r, 0, sizeof *r);
+    r->hasMin = !getField(c, k, GET_MIN, &r->min);
+    r->hasMax = !getField(c, k, GET_MAX, &r->max);
+    r->hasRes = !getField(c, k, GET_RES, &r->res);
+}
+
+#define MAP_MAX 8
+// The names of k's map that the camera accepts (all if c is NULL). A standard control must stay inside the camera's
+// GET_MIN..GET_MAX, the exposure mode inside the modes of its GET_RES. A Logitech control takes exactly its table: the
+// field of view says 255 for GET_MAX and only 0 to 2 do anything. A name is listed once; display also drops a second
+// name for the same value ("1" for on).
+static int choicesOf(Cam *c, const Ctrl *k, const Map **out, int display) {
+    Range r = {0};
+    uint8_t modes = 0;
+    int std = c && !isXU(k), haveModes = 0, n = 0;
+    if (std && k->unit == U_CT && k->sel == CT_AE_MODE)
+        haveModes = !request(c, GET_RES, c->unit[k->unit], k->sel, &modes, 1, NULL);
+    else if (std) getRange(c, k, &r);
+    for (const Map *m = k->map; m->name; m++) {
+        int ok = 1, dup = 0;
+        if (haveModes) ok = (modes & m->raw) != 0;
+        else if (std) ok = !(r.hasMin && m->raw < r.min) && !(r.hasMax && m->raw > r.max);
+        for (int j = 0; j < n; j++) dup |= !strcmp(out[j]->name, m->name) || (display && out[j]->raw == m->raw);
+        if (ok && !dup && n < MAP_MAX) out[n++] = m;
+    }
+    return n;
+}
+
+static int parseValue(Cam *c, const Ctrl *k, const char *arg, long *raw) {
     if (k->map) {
-        for (const Map *m = k->map; m->name; m++)
-            if (!strcmp(m->name, arg)) { *raw = m->raw; return 0; }
+        const Map *ch[MAP_MAX];
+        int n = choicesOf(c, k, ch, 0);
+        for (int i = 0; i < n; i++)
+            if (!strcmp(ch[i]->name, arg)) { *raw = ch[i]->raw; return 0; }
         return -1;
     }
     char *end;
@@ -849,6 +916,34 @@ static void formatValue(const Ctrl *k, long raw, char *s, size_t n) {
     } else {
         snprintf(s, n, "%ld", raw / scaleOf(k));
     }
+}
+
+// What a control does, with the names it takes after a colon ("field of view in degrees: 90, 78, 65"), or where its
+// help has %s.
+static void helpText(Cam *c, const Ctrl *k, char *out, size_t n) {
+    char names[128] = "";
+    const Map *ch[MAP_MAX];
+    int cnt = k->map ? choicesOf(c, k, ch, 1) : 0;
+    for (int i = 0; i < cnt; i++) {
+        size_t len = strlen(names);
+        snprintf(names + len, sizeof names - len, "%s%s", i ? ", " : ": ", ch[i]->name);
+    }
+    const char *at = strstr(k->help, "%s");
+    if (at) snprintf(out, n, "%.*s%s%s", (int)(at - k->help), k->help, names, at + 2);
+    else snprintf(out, n, "%s%s", k->help, names);
+}
+
+// The camera's range of a numeric control as the user sees it: "3-2047", or "-20..20" if it starts below zero.
+static void rangeText(Cam *c, const Ctrl *k, char *out, size_t n) {
+    Range r;
+    char lo[16], hi[16];
+    out[0] = 0;
+    if (k->map) return;
+    getRange(c, k, &r);
+    if (!r.hasMin || !r.hasMax) return;
+    formatValue(k, r.min, lo, sizeof lo);
+    formatValue(k, r.max, hi, sizeof hi);
+    snprintf(out, n, r.min < 0 ? "%s..%s" : "%s-%s", lo, hi);
 }
 
 static const char *const RS_SPEED[] = {"slower", "normal", "faster"};
@@ -872,7 +967,7 @@ static int readFirmware(Cam *c, char fw[16]) {
 // 1 while the camera is tilted to the desk and shows it (Show Mode), 0 if not, -1 if it does not say.
 static int readDesk(Cam *c) {
     uint8_t active = 0;
-    if (!c->unit[U_INFO] || request(c, GET_CUR, c->unit[U_INFO], INFO_SHOWMODE_ACTIVE, &active, 1, NULL)) return -1;
+    if (!(c->feat & F_FULL) || !c->unit[U_INFO] || request(c, GET_CUR, c->unit[U_INFO], INFO_SHOWMODE_ACTIVE, &active, 1, NULL)) return -1;
     return active != 0;
 }
 
@@ -881,6 +976,7 @@ static void readStatus(Cam *c, Status *s) {
     long len;
     memset(s, 0, sizeof *s);
     s->colour = s->video = s->led = s->desk = s->rs = -1;
+    if (!(c->feat & F_FULL)) return;  // these registers are known on the MX Brio only
     if (c->unit[U_INFO]) {
         readFirmware(c, s->fw);
         if (request(c, GET_CUR, c->unit[U_INFO], INFO_SERIAL, s->sn, 12, NULL)) s->sn[0] = 0;
@@ -938,18 +1034,31 @@ static void showStatus(const Status *s) {
 static int show(Cam *c) {
     Status s;
     readStatus(c, &s);
-    printf("MX Brio");
-    if (s.fw[0]) printf("  firmware %s", s.fw);
-    if (s.sn[0]) printf("  serial %s", s.sn);
-    if (s.colour >= 0) printf("  colour code %d", s.colour);
+    printf("%s", camName(&c->info));
+    if (c->feat & F_FULL) {
+        if (s.fw[0]) printf("  firmware %s", s.fw);
+        if (s.sn[0]) printf("  serial %s", s.sn);
+        if (s.colour >= 0) printf("  colour code %d", s.colour);
+    } else {
+        printf("  %04x:%04x", c->info.vid, c->info.pid);
+        if (c->info.serial[0]) printf("  serial %s", c->info.serial);
+    }
     printf("\n");
-    showStatus(&s);
+    if (c->info.support == S_EXPERIMENTAL)
+        printf("experimental support: reported by other projects, not tested with brioctl; "
+               "please report with 'brioctl snapshot'\n");
+    else if (c->info.support == S_STANDARD) printf("standard UVC controls only\n");
+    if (c->feat & F_FULL) showStatus(&s);
 
     int rc = 0;
+    const char *head = NULL;
     for (int i = 0; i < NCTRLS; i++) {
         const Ctrl *k = &CTRLS[i];
-        if (!k->name) { printf("\n%s\n", k->help); continue; }
-        char cs[16], ds[16];
+        if (!k->name) { head = k->help; continue; }
+        if (!avail(c, k)) continue;
+        if (head) printf("\n%s\n", head);
+        head = NULL;
+        char cs[16], ds[16], rg[32], help[192];
         int autoNow;
         if (readCtrl(c, k, cs, ds, &autoNow)) {
             printf("  %-11s ?\n", k->name);
@@ -958,13 +1067,17 @@ static int show(Cam *c) {
         }
         if (!ds[0]) snprintf(ds, sizeof ds, "?");
         if (autoNow) strncat(cs, "*", sizeof cs - strlen(cs) - 1);
-        printf("  %-11s %-9s default %-9s %s\n", k->name, cs, ds, k->help);
+        rangeText(c, k, rg, sizeof rg);
+        helpText(c, k, help, sizeof help);
+        printf("  %-11s %-9s default %-9s %-11s %s\n", k->name, cs, ds, rg, help);
     }
 
-    Float32 g;
-    printf("\nMicrophone (macOS)\n");
-    if (!micRead(&g)) printf("  %-11s %-9.4f default %-9s %s\n", "micgain", g, "-", "input volume: 0-1");
-    else printf("  %-11s ?\n", "micgain");
+    if (c->feat & F_FULL) {
+        Float32 g;
+        printf("\nMicrophone (macOS)\n");
+        if (!micRead(&g)) printf("  %-11s %-9.4f default %-9s %-11s %s\n", "micgain", g, "-", "0-1", "input volume");
+        else printf("  %-11s ?\n", "micgain");
+    }
     printf("\n* set automatically right now\n");
     return rc;
 }
@@ -1035,17 +1148,32 @@ static void jvalue(const Ctrl *k, const char *s) {
     else printf("%s", s);
 }
 
+// A register value of a numeric control, scaled as the user sees it; null if the camera did not say.
+static void jscaled(const Ctrl *k, int has, long raw) {
+    char s[16];
+    if (!has) { printf("null"); return; }
+    formatValue(k, raw, s, sizeof s);
+    printf("%s", s);
+}
+
 // The same information as show, as one JSON object on one line.
 static int showJson(Cam *c) {
     Status s;
     readStatus(c, &s);
-    printf("{\"device\":{\"model\":\"MX Brio\",\"firmware\":");
+    const CamInfo *ci = &c->info;
+    printf("{\"device\":{\"model\":");
+    jstr(ci->model);
+    printf(",\"firmware\":");
     jstr(s.fw[0] ? s.fw : NULL);
     printf(",\"serial\":");
-    jstr(s.sn[0] ? s.sn : NULL);
+    jstr(s.sn[0] ? s.sn : ci->serial[0] ? ci->serial : NULL);
     printf(",\"colour\":");
     jint(s.colour);
-    printf("},\"status\":{\"video\":");
+    printf(",\"name\":");
+    jstr(ci->name[0] ? ci->name : NULL);
+    printf(",\"vid\":\"%04x\",\"pid\":\"%04x\",\"support\":\"%s\",\"index\":%d,\"location\":\"0x%x\"},", ci->vid,
+           ci->pid, SUPPORT[ci->support], ci->index, ci->loc);
+    printf("\"status\":{\"video\":");
     if (s.video < 0) printf("null");
     else {
         printf("{\"on\":");
@@ -1071,37 +1199,75 @@ static int showJson(Cam *c) {
     printf("},\"settings\":{");
 
     int rc = 0, first = 1;
+    const char *group = NULL;
     for (int i = 0; i < NCTRLS; i++) {
         const Ctrl *k = &CTRLS[i];
-        char cs[16], ds[16];
+        char cs[16], ds[16], help[192];
         int autoNow;
-        if (!k->name) continue;
+        if (!k->name) { group = k->group; continue; }
+        if (!avail(c, k)) continue;
         if (readCtrl(c, k, cs, ds, &autoNow)) rc = 1;
+        int info = getInfo(c, k);
         printf("%s\"%s\":{\"value\":", first ? "" : ",", k->name);
         first = 0;
         jvalue(k, cs);
         printf(",\"default\":");
         jvalue(k, ds);
-        printf(",\"auto\":%s}", autoNow ? "true" : "false");
+        printf(",\"auto\":%s,\"group\":", autoNow ? "true" : "false");
+        jstr(group);
+        printf(",\"writable\":%s,\"kind\":\"%s\"", info >= 0 && (info & INFO_SET) && !(info & INFO_AUTO) ? "true" : "false",
+               !k->map ? "number" : k->map == ON_OFF ? "bool" : "choice");
+        if (!k->map) {
+            Range r;
+            getRange(c, k, &r);
+            printf(",\"min\":");
+            jscaled(k, r.hasMin, r.min);
+            printf(",\"max\":");
+            jscaled(k, r.hasMax, r.max);
+            printf(",\"step\":");
+            jscaled(k, r.hasRes, r.res);
+        } else if (k->map != ON_OFF) {
+            const Map *ch[MAP_MAX];
+            int n = choicesOf(c, k, ch, 1);
+            printf(",\"choices\":[");
+            for (int j = 0; j < n; j++) {
+                if (j) putchar(',');
+                jstr(ch[j]->name);
+            }
+            printf("]");
+        }
+        helpText(c, k, help, sizeof help);
+        printf(",\"help\":");
+        jstr(help);
+        printf("}");
     }
     Float32 g;
     printf("},\"micgain\":");
-    if (!micRead(&g)) printf("%.4f", g);
+    if ((c->feat & F_FULL) && !micRead(&g)) printf("%.4f", g);
     else printf("null");
     printf("}\n");
     return rc;
 }
 
-static const Ctrl *findCtrl(const char *name) {
-    for (int i = 0; i < NCTRLS; i++)
-        if (CTRLS[i].name && !strcmp(CTRLS[i].name, name)) return &CTRLS[i];
-    return NULL;
+// The control of that name, the one this camera has if the table has several. hdr and backlight are one control (the
+// backlight compensation) under two names; either is accepted on every camera. NULL if there is no such control; the
+// caller checks avail for the camera.
+static const Ctrl *findCtrl(const Cam *c, const char *name) {
+    const Ctrl *any = NULL;
+    int backlight = !strcmp(name, "hdr") || !strcmp(name, "backlight");
+    for (int i = 0; i < NCTRLS; i++) {
+        const Ctrl *k = &CTRLS[i];
+        int same = k->name && (!strcmp(k->name, name) || (backlight && k->unit == U_PU && k->sel == 0x01));
+        if (same && avail(c, k)) return k;
+        if (same && !any) any = k;
+    }
+    return any;
 }
 
 // Print one value the way show does, without anything else (for scripts).
 static int get(Cam *c, const char *name) {
     char cs[16];
-    if (!strcmp(name, "micgain")) {
+    if (!strcmp(name, "micgain") && (c->feat & F_FULL)) {
         Float32 g;
         if (micRead(&g)) {
             fprintf(stderr, "micgain: no readable %s microphone in macOS audio devices\n", MIC_NAME);
@@ -1110,8 +1276,9 @@ static int get(Cam *c, const char *name) {
         printf("%.4f\n", g);
         return 0;
     }
-    const Ctrl *k = findCtrl(name);
-    if (!k) { fprintf(stderr, "unknown setting: %s\n", name); return 1; }
+    const Ctrl *k = findCtrl(c, name);
+    if (!k || !strcmp(name, "micgain")) { fprintf(stderr, "unknown setting: %s\n", name); return 1; }
+    if (!avail(c, k)) { fprintf(stderr, "%s: control not found on this camera\n", name); return 1; }
     if (readCtrl(c, k, cs, NULL, NULL)) { fprintf(stderr, "%s: cannot read the value\n", name); return 1; }
     printf("%s\n", cs);
     return 0;
@@ -1121,21 +1288,23 @@ static int get(Cam *c, const char *name) {
 static int rightsightHolds(Cam *c) {
     uint8_t b[4] = {0};
     long len;
-    int unit = c->unit[U_PERIPHERAL];
+    int unit = (c->feat & F_FULL) ? c->unit[U_PERIPHERAL] : 0;
     return unit && !getValue(c, GET_LEN, unit, PERIPHERAL_RIGHTSIGHT, 2, &len) && len == sizeof b &&
            !request(c, GET_CUR, unit, PERIPHERAL_RIGHTSIGHT, b, sizeof b, NULL) && b[0];
 }
 
 static int set(Cam *c, const char *name, const char *arg) {
-    if (!strcmp(name, "micgain")) return setMicGain(arg);
-    const Ctrl *k = findCtrl(name);
-    if (!k) { fprintf(stderr, "unknown setting: %s\n", name); return -1; }
+    if (!strcmp(name, "micgain") && (c->feat & F_FULL)) return setMicGain(arg);
+    const Ctrl *k = findCtrl(c, name);
+    if (!k || !strcmp(name, "micgain")) { fprintf(stderr, "unknown setting: %s\n", name); return -1; }
     int unit = c->unit[k->unit];
-    if (!unit) { fprintf(stderr, "%s: control not found on this camera\n", name); return -1; }
+    if (!avail(c, k)) { fprintf(stderr, "%s: control not found on this camera\n", name); return -1; }
 
-    long raw, len, min, max, cur;
-    if (parseValue(k, arg, &raw)) {
-        fprintf(stderr, "%s: bad value %s (%s)\n", name, arg, k->help);
+    char help[192];
+    long raw, len, cur;
+    if (parseValue(c, k, arg, &raw)) {
+        helpText(c, k, help, sizeof help);
+        fprintf(stderr, "%s: bad value %s (%s)\n", name, arg, help);
         return -1;
     }
     // Extension units report their size; refuse to write if firmware changed the layout.
@@ -1144,12 +1313,21 @@ static int set(Cam *c, const char *name, const char *arg) {
         return -1;
     }
     int info = getInfo(c, k);
-    if (info >= 0 && (info & INFO_AUTO)) {
-        fprintf(stderr, "%s: set automatically right now (%s)\n", name, k->help);
+    if (info >= 0 ? !(info & INFO_SET) : isXU(k)) {  // an extension unit must say it can be set
+        fprintf(stderr, "%s: the camera does not allow writing it\n", name);
         return -1;
     }
-    if (!getField(c, k, GET_MIN, &min) && !getField(c, k, GET_MAX, &max) && (raw < min || raw > max)) {
-        fprintf(stderr, "%s: %s is out of range (%s)\n", name, arg, k->help);
+    if (info >= 0 && (info & INFO_AUTO)) {
+        helpText(c, k, help, sizeof help);
+        fprintf(stderr, "%s: set automatically right now (%s)\n", name, help);
+        return -1;
+    }
+    Range r;
+    getRange(c, k, &r);
+    if (!k->map && ((r.hasMin && raw < r.min) || (r.hasMax && raw > r.max))) {
+        char rg[32];
+        rangeText(c, k, rg, sizeof rg);
+        fprintf(stderr, "%s: %s is out of range (%s)\n", name, arg, rg);
         return -1;
     }
     // A field shares the control with others: keep their current values.
@@ -1162,12 +1340,16 @@ static int set(Cam *c, const char *name, const char *arg) {
     char s[16];
     formatValue(k, raw, s, sizeof s);
     if (haveCur && getLE(b + k->off, fieldSize(k), k->sgn) == raw) {  // already set: no write, no flash wear or restart
-        if (!quiet) printf("%s %s\n", name, s);
+        if (!quiet) printf("%s %s\n", k->name, s);
         return 0;
     }
     putLE(b + k->off, fieldSize(k), raw);
     IOReturn kr = request(c, SET_CUR, unit, k->sel, b, k->len, NULL);
-    if (kr) { fprintf(stderr, "%s: write failed: 0x%x (%s)\n", name, kr, k->help); return -1; }
+    if (kr) {
+        helpText(c, k, help, sizeof help);
+        fprintf(stderr, "%s: write failed: 0x%x (%s)\n", name, kr, help);
+        return -1;
+    }
     if (getField(c, k, GET_CUR, &cur) || cur != raw) {
         if (k->unit == U_CT && (k->sel == CT_ZOOM || k->sel == CT_PANTILT) && rightsightHolds(c))
             fprintf(stderr, "%s: ignored, Logitech's RightSight holds the framing while there is no video\n", name);
@@ -1175,7 +1357,7 @@ static int set(Cam *c, const char *name, const char *arg) {
         return -1;
     }
     written++;
-    printf("%s %s\n", name, s);
+    printf("%s %s\n", k->name, s);
     return 0;
 }
 
@@ -1214,13 +1396,14 @@ static int save(Cam *c, const char *name) {
     time_t t = time(NULL);
     strftime(ts, sizeof ts, "%Y-%m-%d %H:%M", localtime(&t));
     fprintf(f, "# brioctl settings, saved %s\n", ts);
+    fprintf(f, "# camera %04x:%04x%s%s\n", c->info.vid, c->info.pid, c->info.serial[0] ? " " : "", c->info.serial);
 
     int n = 0;
     for (int i = 0; i < NCTRLS; i++) {
         const Ctrl *k = &CTRLS[i];
         long cur, min, max;
         char s[16];
-        int info = k->name && c->unit[k->unit] ? getInfo(c, k) : -1;
+        int info = avail(c, k) ? getInfo(c, k) : -1;
         // Skip what cannot be set now: values driven by an auto mode are saved as that mode.
         if (info < 0 || !(info & INFO_SET) || (info & INFO_AUTO) || getField(c, k, GET_CUR, &cur)) continue;
         // and values outside the camera's own range, which apply would refuse
@@ -1230,7 +1413,7 @@ static int save(Cam *c, const char *name) {
         n++;
     }
     Float32 g;
-    if (!micRead(&g)) { fprintf(f, "micgain %.4f\n", g); n++; }
+    if ((c->feat & F_FULL) && !micRead(&g)) { fprintf(f, "micgain %.4f\n", g); n++; }
     fclose(f);
     printf("saved %d settings to %s\n", n, path);
     return 0;
@@ -1254,15 +1437,25 @@ static int isFraming(const char *name) {
 
 // Does the camera's mic differ from what the file asks for (or can it not tell)?
 static int micDiffers(Cam *c, const char *arg) {
-    const Ctrl *k = findCtrl("mic");
+    const Ctrl *k = findCtrl(c, "mic");
     long raw, cur;
-    return !k || parseValue(k, arg, &raw) || getField(c, k, GET_CUR, &cur) || cur != raw;
+    return !k || !avail(c, k) || parseValue(c, k, arg, &raw) || getField(c, k, GET_CUR, &cur) || cur != raw;
+}
+
+// The "# camera VID:PID SERIAL" line of a settings file: say so if it was saved from another model (not an error: the
+// settings that fit are still applied).
+static void checkCamera(const Cam *c, const char *line) {
+    unsigned vid, pid;
+    if (sscanf(line, "# camera %x:%x", &vid, &pid) == 2 && ((int)vid != c->info.vid || (int)pid != c->info.pid))
+        fprintf(stderr, "warning: these settings were saved from camera %04x:%04x, this is %04x:%04x (%s)\n", vid, pid,
+                c->info.vid, c->info.pid, camName(&c->info));
 }
 
 static int applyStream(Cam *c, FILE *f) {
     char line[256], name[64], value[64], mic[64] = "", skipped[64] = "";
     int rc = 0;
     while (fgets(line, sizeof line, f)) {
+        if (!strncmp(line, "# camera ", 9)) checkCamera(c, line);
         char *hash = strchr(line, '#');
         if (hash) *hash = 0;
         if (sscanf(line, "%63s %63s", name, value) != 2) continue;
@@ -1351,7 +1544,7 @@ static int profiles(int json) {
     return 0;
 }
 
-// Camera's own defaults (GET_DEF) for every control in the table except mic and showmode: for those two GET_DEF
+// Camera's own defaults (GET_DEF) for every control the camera has except mic and showmode: for those two GET_DEF
 // says off, but a real factory reset leaves them on. Nothing restarts and Logitech's hidden state is left alone.
 static int defaults(Cam *c) {
     int rc = 0;
@@ -1359,7 +1552,7 @@ static int defaults(Cam *c) {
         const Ctrl *k = &CTRLS[i];
         long def;
         char s[16];
-        if (!k->name || !strcmp(k->name, "mic") || !strcmp(k->name, "showmode") || !c->unit[k->unit]) continue;
+        if (!avail(c, k) || !strcmp(k->name, "mic") || !strcmp(k->name, "showmode")) continue;
         int info = getInfo(c, k);
         if (info < 0 || !(info & INFO_SET) || (info & INFO_AUTO) || getField(c, k, GET_DEF, &def)) continue;
         formatValue(k, def, s, sizeof s);
@@ -1579,10 +1772,17 @@ static const struct { const char *guid; int sel; } HIDDEN[] = {
 };
 
 // Service registers: chip debug and update units, the factory reset, the flash lock, the lens EEPROM / focus motor
-// debug command (Peripheral 7), the restart (Peripheral 17) and factory optics calibration (Videopipe 2).
-// dump asks them only for GET_INFO and GET_LEN.
+// debug command (Peripheral 7), the restart (Peripheral 17) and factory optics calibration (Videopipe 2). So is every
+// register of an extension unit brioctl does not know (another vendor's, or Logitech's unit 2): what reading it does
+// is not known. dump asks them only for GET_INFO and GET_LEN.
+static int knownXU(const char *guid) {
+    for (size_t i = 0; i < sizeof KNOWN_XU / sizeof *KNOWN_XU; i++)
+        if (!strcmp(guid, KNOWN_XU[i].guid)) return 1;
+    return 0;
+}
+
 static int serviceReg(const char *guid, int sel) {
-    return !strcmp(guid, GUID_TESTDEBUG) || !strcmp(guid, GUID_AIT) || !strcmp(guid, GUID_UNKNOWN) ||
+    return !knownXU(guid) || !strcmp(guid, GUID_TESTDEBUG) || !strcmp(guid, GUID_AIT) || !strcmp(guid, GUID_UNKNOWN) ||
            (!strcmp(guid, GUID_INFO) && (sel == INFO_FACTORY_RESET || sel == INFO_FLASH_LOCK)) ||
            (!strcmp(guid, GUID_PERIPHERAL) && (sel == 7 || sel == 17)) || (!strcmp(guid, GUID_VIDEOPIPE) && sel == 2);
 }
@@ -1717,7 +1917,7 @@ static int snapshot(Cam *c, const char *path) {
     if (!f) { perror(path); return 1; }
     char fw[16] = "unknown", ts[32];
     time_t t = time(NULL);
-    readFirmware(c, fw);
+    if (c->info.vid == VID_LOGITECH) readFirmware(c, fw);  // one read of Logitech's device info unit, if it has one
     strftime(ts, sizeof ts, "%Y-%m-%d %H:%M", localtime(&t));
     fprintf(f, "# brioctl snapshot 1, firmware %s, %s\ndevice %04x %04x\n", fw, ts, c->info.vid, c->info.pid);
     if (c->info.name[0]) fprintf(f, "name %s\n", c->info.name);
@@ -1730,13 +1930,13 @@ static int snapshot(Cam *c, const char *path) {
     hex(f, c->cfg, c->cfgLen);
     fprintf(f, "\n");
     Float32 g;
-    if (!micRead(&g)) fprintf(f, "micgain %.4f\n", g);
+    if ((c->feat & F_FULL) && !micRead(&g)) fprintf(f, "micgain %.4f\n", g);
 
     SnapReg todo[NCTRLS + NEXTRA];
     int nt = 0, n = 0;
-    for (int i = 0; i < NCTRLS; i++)
-        if (CTRLS[i].name) todo[nt++] = (SnapReg){CTRLS[i].unit, CTRLS[i].sel, CTRLS[i].len, F_COUNT};
-    for (int i = 0; i < NEXTRA; i++) todo[nt++] = EXTRA[i];
+    for (int i = 0; i < NCTRLS; i++)  // what brioctl would read from this camera
+        if (avail(c, &CTRLS[i])) todo[nt++] = (SnapReg){CTRLS[i].unit, CTRLS[i].sel, CTRLS[i].len, F_COUNT};
+    for (int i = 0; i < NEXTRA && (c->feat & F_FULL); i++) todo[nt++] = EXTRA[i];
     for (int i = 0; i < nt; i++) {
         int dup = 0;
         for (int j = 0; j < i; j++) dup |= todo[j].unit == todo[i].unit && todo[j].sel == todo[i].sel;  // pan, tilt
@@ -1772,11 +1972,14 @@ static void usage(FILE *f) {
                "       brioctl dump                list all UVC units and extension controls (read-only)\n"
                "       brioctl snapshot [FILE]     write every register brioctl reads, serial masked (read-only)\n"
                "       brioctl --version           print the version\n");
+    fprintf(f, "\nWhat a camera has depends on the camera: 'brioctl' shows its settings and their ranges. Setting names:\n");
     for (int i = 0; i < NCTRLS; i++) {
+        char help[192];
+        helpText(NULL, &CTRLS[i], help, sizeof help);
         if (!CTRLS[i].name) fprintf(f, "\n%s:\n", CTRLS[i].help);
-        else fprintf(f, "  %-11s %s\n", CTRLS[i].name, CTRLS[i].help);
+        else fprintf(f, "  %-11s %s\n", CTRLS[i].name, help);
     }
-    fprintf(f, "\nMicrophone (macOS):\n  %-11s %s\n", "micgain", "input volume: 0-1");
+    fprintf(f, "\nMicrophone (macOS, MX Brio only):\n  %-11s %s\n", "micgain", "input volume, 0-1");
 }
 
 int main(int argc, char **argv) {
