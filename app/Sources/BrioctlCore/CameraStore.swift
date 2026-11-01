@@ -1,10 +1,21 @@
 import Foundation
 import SwiftUI
 
+/// Where the debounced save for `brioctl watch` stands.
+public enum AutoSaveStatus: Equatable {
+    case idle
+    /// A change was written; the save follows when the changes stop.
+    case pending
+    /// The settings file now has what the camera has (shown for a few seconds).
+    case saved
+}
+
 /// The state of the chosen camera as the CLI reports it, and every change to it. All CLI calls go through here.
 @MainActor
 public final class CameraStore: ObservableObject {
     public static let sliderDelay: TimeInterval = 0.15
+    /// How long the changes must stop before they are saved for `brioctl watch`.
+    public static let autoSaveDelay: TimeInterval = 1.0
     static let selectedKey = "selectedCamera"
 
     @Published public private(set) var cameras: [CameraInfo] = []
@@ -18,6 +29,7 @@ public final class CameraStore: ObservableObject {
     /// A short confirmation ("Saved warm").
     @Published public private(set) var notice: String?
     @Published public private(set) var isLoading = false
+    @Published public private(set) var autoSaveStatus: AutoSaveStatus = .idle
     /// What the user has set and the CLI has not confirmed yet.
     @Published public private(set) var pending: [String: SettingValue] = [:]
     @Published public private(set) var cliVersion: String?
@@ -31,8 +43,24 @@ public final class CameraStore: ObservableObject {
     private var debounceTasks: [String: Task<Void, Never>] = [:]
     private var refreshTask: Task<Void, Never>?
     private var noticeTask: Task<Void, Never>?
+    private var autoSaveTask: Task<Void, Never>?
+    private var autoSaveTarget: AutoSaveTarget?
+    private var savedHintTask: Task<Void, Never>?
+
+    private struct AutoSaveTarget {
+        var camera: CameraInfo?
+        /// The --camera value of the camera that was written, kept in case another one is chosen before the save.
+        var argument: String?
+    }
+
     /// Asks before something that interrupts the camera; the app shows an alert. Arguments: title, text, button.
     public var confirm: (String, String, String) -> Bool = { _, _, _ in true }
+    /// Keeps the file `brioctl watch` re-applies in step with the camera: after each successful change of the app's own,
+    /// `brioctl save` runs once the changes pause for `autoSaveDelay` seconds. Asked with the camera that was written,
+    /// when the change is made and again when the save is due. The app model answers from the installed LaunchAgents;
+    /// without one nothing is saved.
+    public var autoSaveEnabled: (CameraInfo?) -> Bool = { _ in false }
+    public var autoSaveDelay: TimeInterval = CameraStore.autoSaveDelay
 
     public init(runner: CLIRunning, defaults: UserDefaults = .standard) {
         self.runner = runner
@@ -179,6 +207,7 @@ public final class CameraStore: ObservableObject {
         } else {
             for n in names { errors[n] = nil }
             banner = nil
+            scheduleAutoSave()
         }
         await reloadState()
         // The camera's values are shown again, unless the user has moved on since.
@@ -204,6 +233,7 @@ public final class CameraStore: ObservableObject {
         if r.ok {
             banner = nil
             show(notice: "Applied \(name)")
+            scheduleAutoSave()
         } else {
             banner = r.message
         }
@@ -223,9 +253,73 @@ public final class CameraStore: ObservableObject {
             return false
         }
         banner = nil
+        if name == nil { cancelAutoSave(for: cameraArgument) }  // the file is up to date now
         await reloadProfiles()
         show(notice: name.map { "Saved \u{201C}\($0.trimmingCharacters(in: .whitespaces))\u{201D}" } ?? "Saved as the settings to re-apply")
         return true
+    }
+
+    // MARK: saving for brioctl watch
+
+    /// Waits for the changes to pause, then saves. Every change starts the wait again, so a burst of slider moves
+    /// ends in one `save`.
+    private func scheduleAutoSave() {
+        let target = AutoSaveTarget(camera: selectedCamera, argument: cameraArgument)
+        guard autoSaveEnabled(target.camera) else { return }
+        if let pending = autoSaveTarget, pending.argument != target.argument {
+            // The wait belongs to another camera: save that one now, this one starts its own wait.
+            autoSaveTask?.cancel()
+            autoSaveTarget = nil
+            Task { await self.runAutoSave(pending) }
+        }
+        autoSaveTarget = target
+        autoSaveStatus = .pending
+        savedHintTask?.cancel()
+        autoSaveTask?.cancel()
+        let nanoseconds = UInt64(max(autoSaveDelay, 0) * 1_000_000_000)
+        autoSaveTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: nanoseconds)
+            if Task.isCancelled { return }
+            await self?.autoSaveDue()
+        }
+    }
+
+    private func autoSaveDue() async {
+        guard let target = autoSaveTarget else { return }
+        autoSaveTarget = nil
+        autoSaveTask = nil
+        await runAutoSave(target)
+    }
+
+    private func runAutoSave(_ target: AutoSaveTarget) async {
+        // The agent may have been removed while the changes were pending.
+        guard autoSaveEnabled(target.camera) else {
+            if autoSaveTarget == nil { autoSaveStatus = .idle }
+            return
+        }
+        let r = await runner.run(CLIArguments.save(camera: target.argument))
+        guard r.ok else {
+            banner = "Could not save the settings for auto-apply: " + r.message
+            if autoSaveTarget == nil { autoSaveStatus = .idle }
+            return
+        }
+        if profiles?.saved.contains("settings") != true { await reloadProfiles() }
+        guard autoSaveTarget == nil else { return }  // newer changes wait for their own save
+        autoSaveStatus = .saved
+        savedHintTask?.cancel()
+        savedHintTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            if Task.isCancelled { return }
+            if self?.autoSaveStatus == .saved { self?.autoSaveStatus = .idle }
+        }
+    }
+
+    private func cancelAutoSave(for argument: String?) {
+        guard let pending = autoSaveTarget, pending.argument == argument else { return }
+        autoSaveTask?.cancel()
+        autoSaveTask = nil
+        autoSaveTarget = nil
+        autoSaveStatus = .idle
     }
 
     public func show(notice text: String) {

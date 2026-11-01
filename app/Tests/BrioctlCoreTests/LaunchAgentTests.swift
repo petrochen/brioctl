@@ -174,6 +174,24 @@ final class LaunchAgentTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: dir.path))
     }
 
+    @MainActor
+    func testARedirectedAgentsDirectoryNeverReachesLaunchd() throws {
+        let bundle = Bundle(for: LaunchAgentTests.self), home = URL(fileURLWithPath: "/Users/example")
+        let redirected = AppEnvironment(processEnvironment: ["BRIOCTL_APP_AGENTS_DIR": dir.path], bundle: bundle, home: home)
+        let launchctl = AppModel.defaultLaunchctl(for: redirected)
+        XCTAssertTrue(launchctl is InertLaunchctl)
+        XCTAssertTrue(AppModel.defaultLaunchctl(for: AppEnvironment(processEnvironment: [:], bundle: bundle, home: home))
+                      is SystemLaunchctl)
+
+        // The same label as the real agent, a directory of its own, and still nothing loaded.
+        let manager = LaunchAgentManager(directory: dir, launchctl: launchctl, cliPath: cli, appPath: app, logPath: "/x/log")
+        try manager.installWatch(camera: nil)
+        XCTAssertEqual(manager.watchState(), .app(usesThisCopy: true))
+        XCTAssertFalse(manager.watchIsRunning())
+        try manager.removeWatch()
+        XCTAssertEqual(manager.watchState(), .off)
+    }
+
     func testTheEnvironmentRedirectsEverything() {
         let env = AppEnvironment(processEnvironment: [
             "BRIOCTL_APP_CLI": "/tmp/fake/brioctl-fake", "BRIOCTL_APP_AGENTS_DIR": "/tmp/agents",
@@ -182,6 +200,7 @@ final class LaunchAgentTests: XCTestCase {
         XCTAssertEqual(env.cliURL?.path, "/tmp/fake/brioctl-fake")
         XCTAssertTrue(env.usesCLIOverride)
         XCTAssertEqual(env.agentsDirectory.path, "/tmp/agents")
+        XCTAssertTrue(env.usesAgentsOverride)
         XCTAssertEqual(env.logPath, "/Users/example/Library/Logs/brioctl.log")
         XCTAssertEqual(env.processEnvironment["BRIOCTL_FAKE"], "/tmp/x.snap", "the CLI inherits it")
         env.defaults.removePersistentDomain(forName: "com.example.brioctl-test")
@@ -189,6 +208,7 @@ final class LaunchAgentTests: XCTestCase {
         let plain = AppEnvironment(processEnvironment: [:], bundle: Bundle(for: LaunchAgentTests.self),
                                    home: URL(fileURLWithPath: "/Users/example"))
         XCTAssertFalse(plain.usesCLIOverride)
+        XCTAssertFalse(plain.usesAgentsOverride)
         XCTAssertEqual(plain.agentsDirectory.path, "/Users/example/Library/LaunchAgents")
         XCTAssertEqual(plain.cliURL?.lastPathComponent, "brioctl")
     }

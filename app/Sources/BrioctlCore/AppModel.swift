@@ -24,13 +24,15 @@ public final class AppModel: ObservableObject {
         }
     }
 
+    /// - Parameter launchctl: nil = the real launchd, or none at all when the agents directory is redirected.
     public init(environment: AppEnvironment = AppEnvironment(), runner: CLIRunning? = nil,
-                launchctl: LaunchctlRunning = SystemLaunchctl()) {
+                launchctl: LaunchctlRunning? = nil) {
         self.environment = environment
         let cli = environment.cliURL ?? URL(fileURLWithPath: "/nonexistent/brioctl")
         store = CameraStore(runner: runner ?? ProcessCLIRunner(executable: cli, environment: environment.processEnvironment),
                             defaults: environment.defaults)
-        agents = LaunchAgentManager(directory: environment.agentsDirectory, launchctl: launchctl, cliPath: cli.path,
+        agents = LaunchAgentManager(directory: environment.agentsDirectory,
+                                    launchctl: launchctl ?? Self.defaultLaunchctl(for: environment), cliPath: cli.path,
                                     appPath: environment.appBundlePath, logPath: environment.logPath)
         hotkeysEnabled = environment.defaults.bool(forKey: "hotkeysEnabled")
         store.confirm = { title, text, button in
@@ -42,10 +44,16 @@ public final class AppModel: ObservableObject {
             alert.addButton(withTitle: "Cancel")
             return alert.runModal() == .alertFirstButtonReturn
         }
+        // Changes made in the app are saved for whatever agent re-applies the settings file (see CameraStore).
+        store.autoSaveEnabled = { [weak self] camera in self?.agents.autoApplyAgent().follows(camera) ?? false }
         hotkeys.onAction = { [weak self] action in
             guard let self else { return }
             Task { await self.handle(hotkey: action) }
         }
+    }
+
+    static func defaultLaunchctl(for environment: AppEnvironment) -> LaunchctlRunning {
+        environment.usesAgentsOverride ? InertLaunchctl() : SystemLaunchctl()
     }
 
     public var appVersion: String { environment.appVersion }
@@ -85,7 +93,7 @@ public final class AppModel: ObservableObject {
                     refreshAgents()
                     return
                 }
-                try agents.installWatch(camera: store.cameras.count > 1 ? store.cameraArgument : nil)
+                try agents.installWatch(camera: watchCameraArgument)
             } else {
                 try agents.removeWatch()
             }
@@ -93,6 +101,14 @@ public final class AppModel: ObservableObject {
             settingsError = "\(error)"
         }
         refreshAgents()
+    }
+
+    /// What the agent is told to follow: the camera, when there are several, or when it is a standard one (without
+    /// --camera the agent waits for the MX Brio and never settles for those).
+    private var watchCameraArgument: String? {
+        guard let camera = store.selectedCamera else { return nil }
+        if store.cameras.count > 1 || camera.support == "standard" { return camera.cliID(among: store.cameras) }
+        return nil
     }
 
     /// The agent applies the file named `settings`: save the camera as it is now.

@@ -64,31 +64,32 @@ struct SettingsPage: View {
                 Toggle("Re-apply settings automatically", isOn: .constant(true)).toggleStyle(.switch).disabled(true)
             }
             Text(autoApplyCaption).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            if case .app(let usesThisCopy) = model.watchState {
-                HStack {
-                    Button("Remember current settings") { Task { await model.rememberCurrentSettings() } }
-                    if !usesThisCopy {
-                        Button("Use this copy of the app") { Task { await model.setAutoApply(true) } }
-                    }
+            HStack {
+                Button("Remember current settings") { Task { await model.rememberCurrentSettings() } }
+                    .disabled(model.store.state == nil)
+                if case .app(usesThisCopy: false) = model.watchState {
+                    Button("Use this copy of the app") { Task { await model.setAutoApply(true) } }
                 }
             }
         }
     }
 
     private var autoApplyCaption: String {
+        let kept = "Changes made here are saved for it automatically."
         switch model.watchState {
         case .off:
-            return "Saves the current settings and starts brioctl watch, which applies them when the camera is connected and when video starts."
+            return "Saves the current settings and starts brioctl watch, which applies them when the camera is connected and when video starts. "
+                + "Without it, \u{201C}Remember current settings\u{201D} saves them for a brioctl watch you run yourself."
         case .app(let usesThisCopy):
             let running = model.watchRunning ? "Running." : "Installed, not running."
             let copy = usesThisCopy ? "" : " It runs the brioctl of another copy of the app."
-            return "\(running)\(copy) It applies the saved \u{201C}settings\u{201D} file; changes made here are kept only after \u{201C}Remember current settings\u{201D}."
+            return "\(running)\(copy) It applies the saved \u{201C}settings\u{201D} file. \(kept)"
         case .other(.homebrew):
-            return "Installed by Homebrew. Manage it with brew services."
+            return "Installed by Homebrew. Manage it with brew services. \(kept)"
         case .other(.makeAgent(let program)):
-            return "Installed by make agent / Homebrew (runs \(program)). Remove it there (make unagent)."
+            return "Installed by make agent (runs \(program)). Remove it there (make unagent). \(kept)"
         case .other(.unreadable):
-            return "An agent with this label is installed by make agent / Homebrew; the app leaves it alone."
+            return "An agent with this label is installed by make agent / Homebrew; the app leaves it alone. \(kept)"
         }
     }
 
