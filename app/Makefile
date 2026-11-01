@@ -12,7 +12,7 @@ VERSION = 1.1.0
 # The CLI is built from ../brioctl.c with the flags of the root Makefile (make universal), into build/cli, so the
 # ./brioctl of the repository is left alone.
 CFLAGS ?= -Wall -Wextra -Wno-missing-field-initializers -O2
-LIBS = -framework IOKit -framework CoreFoundation -framework CoreAudio -framework CoreMediaIO
+LIBS = -framework IOKit -framework CoreFoundation -framework CoreAudio -framework CoreMediaIO -lsqlite3
 UNIVERSAL = -arch arm64 -arch x86_64 -mmacosx-version-min=12.0
 
 BUILD = build
@@ -22,15 +22,16 @@ SWIFTFLAGS = -c release --arch arm64 --arch x86_64
 
 all: $(APP)
 
-$(BUILD)/cli/brioctl: ../brioctl.c Makefile
+# Always rebuilt: the binary embeds VERSION, which can differ from run to run (make zip VERSION=x).
+cli:
 	mkdir -p $(BUILD)/cli
-	$(CC) $(CFLAGS) -DVERSION=\"$(VERSION)\" $(UNIVERSAL) -o $@ ../brioctl.c $(LIBS)
+	$(CC) $(CFLAGS) -DVERSION=\"$(VERSION)\" $(UNIVERSAL) -o $(BUILD)/cli/brioctl ../brioctl.c $(LIBS)
 
 # SwiftPM decides what is out of date.
 swift:
 	swift build $(SWIFTFLAGS)
 
-$(APP): swift $(BUILD)/cli/brioctl Resources/Info.plist.in Makefile
+$(APP): swift cli Resources/Info.plist.in Makefile
 	rm -rf $(APP)
 	mkdir -p $(APP)/Contents/MacOS $(APP)/Contents/Resources
 	cp "$$(swift build $(SWIFTFLAGS) --show-bin-path)/brioctl-app" $(APP)/Contents/MacOS/brioctl-app
@@ -59,4 +60,4 @@ smoke: $(APP)
 clean:
 	rm -rf $(BUILD) .build
 
-.PHONY: all swift zip test smoke clean
+.PHONY: all swift cli zip test smoke clean
