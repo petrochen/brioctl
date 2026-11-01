@@ -2,7 +2,10 @@
 
 What the Logitech MX Brio (USB `046d:0944`) exposes over USB and what each control does. This is the reference
 behind `brioctl`. It describes behaviour only: what you can read, what you can write, and what the camera does
-about it.
+about it. The last sections before "Not known" cover the other cameras: the
+[experimental Logitech models](#experimental-models), the
+[standard controls](#standard-controls-of-other-cameras) of any UVC camera and
+[how `watch` sees video start](#video-start-through-coremediaio).
 
 ## Where this comes from
 
@@ -16,6 +19,7 @@ Each fact is marked:
   the video.
 - **inferred**: taken from the apps or from the firmware analysis and not confirmed by a test on the camera, or only
   partly confirmed.
+- **reported**: taken from another project's report about a camera other than the MX Brio. Not tested with brioctl.
 
 The tests were done on one camera with firmware 1.1.394 (`01 01 8a 01`). Other firmware versions or other units
 may differ, which is why `brioctl` checks the size and range of a control before it writes to it.
@@ -82,7 +86,8 @@ The camera terminal advertises zoom, absolute pan and tilt, exposure mode, expos
 absolute focus and autofocus. The processing unit advertises backlight compensation, brightness, contrast,
 saturation, sharpness, gain, power line frequency, white balance temperature and automatic white balance. There is
 no hue, gamma, iris, roll, privacy or shutter control. All of this was read from the descriptor and the controls
-(measured).
+(measured). How brioctl decides which standard controls any other camera has is under
+[Standard controls of other cameras](#standard-controls-of-other-cameras).
 
 | brioctl name  | Unit / selector | Size | Values                                 | Notes                                                                                         |
 | ------------- | --------------- | ---- | -------------------------------------- | --------------------------------------------------------------------------------------------- |
@@ -212,7 +217,9 @@ Input reports on interface 2. The camera sends nothing while no video is running
 | `0x0a` | After a Show Mode change.                                                                     | Records of number, length, value: 1 zoom (2 bytes), 2 field of view, 3 flip (0 or 1), 4 and 5 four bytes each (probably pan and tilt). | measured |
 
 Writing RightSight Ctl makes the camera send `40 18` (inferred). `brioctl watch` listens to report `0x40` only: after
-`10` or `02` it waits 2 seconds and applies the settings file again.
+`10` or `02` it waits 2 seconds and applies the settings file again. Only the MX Brio is known to send it. For every
+camera, `watch` also sees video start through CoreMediaIO, see
+[below](#video-start-through-coremediaio).
 
 ## Behaviour
 
@@ -346,17 +353,145 @@ the camera after `factory-reset`; the others come from the firmware analysis (in
 write if the size is not what it expects. `dump` asks service registers only for `GET_INFO` and `GET_LEN`, and
 `snapshot` never reads values of the factory reset or the flash lock.
 
-| Register          | What it does                                                                                                                      |
-| ----------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| Test Debug (all)  | Direct access to chip registers, lens memory, sensor and image-processing switches.                                               |
-| AIT custom (all)  | Chip commands and the firmware update channel. A wrong write can damage the camera.                                               |
-| Device info 12    | Factory reset. brioctl writes `0xAA` only for `factory-reset --yes`, after saving your settings.                                  |
-| Device info 13    | Flash lock. A key locks or unlocks it.                                                                                            |
-| Peripheral 7      | Lens motor and lens memory service commands, including writes to the lens memory.                                                 |
-| Peripheral 17     | Restarts the camera when a non-zero value is written. On another Logitech camera (StreamCam) others report it as a factory reset. |
-| Videopipe 2       | Switches to the factory optics calibration mode.                                                                                  |
-| Unit 2            | Unknown.                                                                                                                          |
-| Peripheral 12, 15 | Unknown framing mode and the audio block. Wrong values distort the sound or the framing.                                          |
+| Register          | What it does                                                                                                                                       |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Test Debug (all)  | Direct access to chip registers, lens memory, sensor and image-processing switches.                                                                |
+| AIT custom (all)  | Chip commands and the firmware update channel. A wrong write can damage the camera.                                                                |
+| Device info 12    | Factory reset. brioctl writes `0xAA` only for `factory-reset --yes`, after saving your settings.                                                   |
+| Device info 13    | Flash lock. A key locks or unlocks it.                                                                                                             |
+| Peripheral 7      | Lens motor and lens memory service commands, including writes to the lens memory.                                                                  |
+| Peripheral 17     | Restarts the camera when a non-zero value is written. On another Logitech camera (StreamCam) others report it as a factory reset.                  |
+| Videopipe 2       | Switches to the factory optics calibration mode.                                                                                                   |
+| Unit 2            | Unknown.                                                                                                                                           |
+| Peripheral 12, 15 | Unknown framing mode and the audio block. Wrong values distort the sound or the framing.                                                           |
+| Other cameras     | Every extension unit of a camera that is not in the model table, and every register of an unknown GUID. `dump` asks only `GET_INFO` and `GET_LEN`. |
+
+## Experimental models
+
+`brioctl` knows six Logitech models by their USB product id (vendor `046d`). The MX Brio is `full`: the register notes
+above are about it. The other five are `experimental`: brioctl writes only the extension controls that other projects
+report for them, and the standard controls the camera declares. Nothing here was tested with brioctl (evidence:
+reported), and nothing in the table is known for these cameras beyond the sources below.
+
+| Model                  | Product id | `fov` (Videopipe 5) | `showmode` (Videopipe 13) | Backlight compensation is named | Source                      |
+| ---------------------- | ---------- | ------------------- | ------------------------- | ------------------------------- | --------------------------- |
+| MX Brio                | `0944`     | yes                 | yes                       | `hdr`                           | measured (this document)    |
+| Brio 500               | `0943`     | yes                 | yes                       | `hdr`                           | cameractrls, OpenLogi #1222 |
+| Brio                   | `085e`     | yes                 | no                        | `hdr`                           | cameractrls                 |
+| Brio 501               | `0946`     | yes                 | no                        | `backlight`                     | cameractrls                 |
+| Brio 505               | `0919`     | yes                 | no                        | `backlight`                     | cameractrls                 |
+| Brio 4K Stream Edition | `086b`     | yes                 | no                        | `hdr`                           | cameractrls                 |
+
+"yes" means brioctl offers the setting for the model; "no" means it does not, which says nothing about the camera.
+
+Sources:
+
+- **cameractrls** v0.6.10 (`cameractrls.py` in [soyersoyer/cameractrls](https://github.com/soyersoyer/cameractrls)).
+  The list `LOGITECH_BRIO_FOV_DEV_MATCH` names these product ids and no others for the field of view: `046d:085e`
+  (Brio), `046d:0943` (Brio 500), `046d:0946` (Brio 501), `046d:0919` (Brio 505), `046d:086b` (Brio 4K Stream Edition)
+  and `046d:0944` (MX Brio). The control is selector `0x05` of the extension unit with the GUID
+  `49e40215-f434-47fe-b158-0e885023e51b`, one byte at offset 0: `0x00` is 90 degrees, `0x01` is 78, `0x02` is 65. That
+  GUID is the Videopipe unit above.
+- **OpenLogi issue 1222** ([AprilNEA/OpenLogi](https://github.com/AprilNEA/OpenLogi/issues/1222)), from a Brio 500
+  (`046d:0943`). A read-only probe of the same unit found the field of view at selector 5 (one byte, readable and
+  writable, `GET_MIN` 0, `GET_MAX` 255, `GET_DEF` 0) and Show Mode at selector 13 (one byte, `GET_MIN` 0, `GET_MAX` 1,
+  `GET_DEF` 0). Writes of 3 or 255 to the field of view succeed on the wire and are discarded, so the reported range
+  cannot be used. The issue also says the HDR switch of Logi Tune on that camera is not an extension control: it
+  writes the backlight compensation of the processing unit.
+
+What brioctl does with this:
+
+- **Extension writes.** `fov` on all six models, `showmode` on the MX Brio and the Brio 500. Nothing else is written to
+  an extension unit of an experimental camera: warmth, tint, vibrance, exposure compensation, `mic`, `smooth`, the
+  status registers and `micgain` are for the MX Brio only, because their layout on the other cameras is not known.
+- **Guards.** The unit must be in the descriptor (found by GUID), `GET_LEN` must be 1 and `GET_INFO` must have the write
+  bit. The values come from brioctl's table (0, 1, 2 for the field of view, 0 and 1 for Show Mode), never from `GET_MAX`.
+  After the write the value is read back.
+- **HDR.** On a model with an HDR switch the standard backlight compensation control is named `hdr` (on, off). OpenLogi
+  confirms that for the Brio 500. The Brio and the Brio 4K Stream Edition follow the same naming by assumption (evidence:
+  reported at most); the Brio 501 and 505 use `backlight` (a number). It is the standard control either way, it exists
+  only if the camera declares it, and both names work on every camera.
+- **Reports.** `brioctl snapshot report.snap` writes the descriptor and every register brioctl reads, with the serial
+  number masked. That is what is needed to confirm or correct a row.
+
+## Standard controls of other cameras
+
+For any UVC camera, `brioctl` walks the configuration descriptor, takes the first VideoControl interface, in it the first
+camera terminal (input terminal of type `0x0201`) and the first processing unit, and reads their `bmControls`. A
+standard control exists for brioctl when the camera declares its bit. The bit numbers are those of UVC 1.5, tables 3-6
+(camera terminal) and 3-8 (processing unit); they do not follow the selector numbers. The camera terminal's
+`bControlSize` is at offset 14 of its descriptor and its bitmap starts at 15; the processing unit's is at 7 and 8.
+
+Camera terminal (CT):
+
+| Bit | Selector | brioctl name  | Size | Notes                                     |
+| --- | -------- | ------------- | ---- | ----------------------------------------- |
+| 1   | `0x02`   | `ae`          | 1    | the modes come from `GET_RES`, see below  |
+| 2   | `0x03`   | `priority`    | 1    | 0 = keep frame rate, 1 = keep exposure    |
+| 3   | `0x04`   | `exposure`    | 4    | absolute, units of 100 microseconds       |
+| 5   | `0x06`   | `focus`       | 2    | absolute                                  |
+| 7   | `0x09`   | `iris`        | 2    | absolute, f-number times 100              |
+| 9   | `0x0B`   | `zoom`        | 2    | absolute                                  |
+| 11  | `0x0D`   | `pan`, `tilt` | 8    | two signed 32-bit values, arc seconds     |
+| 13  | `0x0F`   | `roll`        | 2    | absolute, signed, degrees                 |
+| 17  | `0x08`   | `af`          | 1    | autofocus                                 |
+| 18  | `0x11`   | `privacy`     | 1    | privacy shutter, many cameras only report |
+
+Processing unit (PU):
+
+| Bit | Selector | brioctl name        | Size | Notes                                    |
+| --- | -------- | ------------------- | ---- | ---------------------------------------- |
+| 0   | `0x02`   | `brightness`        | 2    | signed                                   |
+| 1   | `0x03`   | `contrast`          | 2    |                                          |
+| 2   | `0x06`   | `hue`               | 2    | signed; writable only with `hueauto` off |
+| 3   | `0x07`   | `saturation`        | 2    |                                          |
+| 4   | `0x08`   | `sharpness`         | 2    |                                          |
+| 5   | `0x09`   | `gamma`             | 2    |                                          |
+| 6   | `0x0A`   | `wb`                | 2    | writable only with `awb` off             |
+| 8   | `0x01`   | `hdr` / `backlight` | 2    | backlight compensation, see above        |
+| 9   | `0x04`   | `gain`              | 2    |                                          |
+| 10  | `0x05`   | `flicker`           | 1    | power line frequency                     |
+| 11  | `0x10`   | `hueauto`           | 1    |                                          |
+| 12  | `0x0B`   | `awb`               | 1    |                                          |
+
+The relative controls, scanning mode, white balance component, digital multiplier and the other bits are not used.
+
+How the values are read:
+
+- Range, step and default come from the camera each time: `GET_MIN`, `GET_MAX`, `GET_RES`, `GET_DEF`. A number is
+  written only inside the range the camera reported, so a camera that does not answer `GET_MIN` and `GET_MAX` gets no
+  numeric writes. `GET_INFO` says whether a control can be written (bit 1) and whether an automatic mode drives it now
+  (bit 2).
+- Named values are offered only if the camera accepts them. Power line frequency: 0 `off`, 1 `50`, 2 `60`, 3 `auto`,
+  limited to the range the camera reports. Exposure mode: the bit mask in `GET_RES` lists the modes (1 manual, 2 auto,
+  4 shutter priority, 8 aperture priority); `auto` is mode 8 on the Logitech cameras and mode 2 on most others (mode 8
+  if the camera lists both), `manual` is 1 and `shutter` is 4.
+- Zoom is the camera's own scale. 100 is 1x on the Logitech cameras.
+- The Logitech extension units are used only on the models in the table above. On every other camera they are not
+  written, and `dump` asks an unknown unit for `GET_INFO` and `GET_LEN` only.
+
+## Video start through CoreMediaIO
+
+`brioctl watch` applies your settings again when video starts, because image settings can be lost with the stream. The
+MX Brio announces a start with HID report `0x40` (see above). Other cameras send no such report that brioctl knows, so
+`watch` also uses CoreMediaIO, which lists every camera on macOS:
+
+- **Device.** For a USB UVC camera the CoreMediaIO device UID is `0x`, the USB location id in hex without leading zeros,
+  the vendor id and the product id as four hex digits each. The MX Brio at location `0x110000` is
+  `0x110000046d0944`. The model UID is `UVC Camera VendorID_1133 ProductID_2372` (the ids in decimal) and the transport
+  type is `usb ` (observed on macOS 26 with an MX Brio; the same form is assumed for other USB cameras). If the camera
+  sits on another port than expected, `watch` takes the one USB device whose UID ends with the vendor and product id,
+  provided there is exactly one.
+- **Signal.** The property `kCMIODevicePropertyDeviceIsRunningSomewhere` is true while any process streams from the
+  camera. `watch` reads it and listens for changes; a change from false to true is a video start. Reading and
+  listening do not open the camera and need no camera permission. A second listener on the list of devices attaches
+  the first one again when the camera is unplugged and connected.
+- **One apply per start.** The HID report and CoreMediaIO feed the same 2 second timer: every signal restarts the wait,
+  and a signal that arrives within 3 seconds after an apply has finished is ignored. So one start gives one apply,
+  whichever signal comes first.
+
+Evidence: the UID form was observed on one MX Brio (macOS 26). That the property changes when an app starts streaming is
+inferred from its documented meaning; it was not tested with other cameras.
 
 ## Not known
 
@@ -369,7 +504,9 @@ write if the size is not what it expects. `dump` asks service registers only for
 
 ## Related sources
 
-- cameractrls (Linux) documents the field of view and LED selectors.
+- cameractrls (Linux) documents the field of view and LED selectors. Its list of Brio product ids is the source of the
+  [experimental models](#experimental-models).
+- OpenLogi issue 1222 (a Brio 500) documents the field of view, Show Mode and the HDR switch of that camera.
 - libwebcam's Logitech XML describes the older Logitech extension units. Some selectors were reused for other
   functions on newer cameras (Videopipe 5 was RightLight ZOI there and is the field of view here), so a size check is
   required before writing anything.

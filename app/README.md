@@ -5,6 +5,9 @@ A SwiftUI menu bar app for [brioctl](../README.md). It draws the settings of a c
 `brioctl watch` LaunchAgent. What it does for a user is described in the [main README](../README.md#menu-bar-app); this
 file is for building and changing it.
 
+The app never opens a camera itself: everything goes through the bundled `brioctl`, which talks to the camera over USB
+and needs no camera permission. The app has no Dock icon (`LSUIElement`).
+
 It is a Swift package (tools version 5.9, Swift 5 language mode, macOS 13 or later) with no dependencies.
 
 ## Build

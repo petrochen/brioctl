@@ -2,33 +2,46 @@
 
 ## 1.1.0 — unreleased
 
-- Any UVC camera: `brioctl list [--json]` shows every USB device with a VideoControl interface, with its model and
-  support level (`full`, `experimental`, `standard`); `--camera ID` (index, serial number or location) chooses one for
-  every command. Without it brioctl uses the only camera, or the only one it knows, or exits with status 2.
-- The standard controls a camera has are read from the control bitmaps of its camera terminal and processing unit.
-  New: `hue`, `hueauto`, `gamma`, `iris`, `roll`, `privacy`; `brightness` and `hue` are signed. `show` prints each
-  numeric control's own range; flicker and exposure mode offer what the camera lists. Backlight compensation is `hdr`
-  on the Logitech models with an HDR switch and `backlight` on the others; both names work everywhere.
+### Added
+
+- Any UVC camera. `brioctl list [--json]` shows every USB device with a VideoControl interface, with its model and
+  support level (`full`, `experimental`, `standard`). The global `--camera ID` (index, serial number or location
+  `0x…`, anywhere in the line) chooses one for every command. Without it brioctl uses the only camera, or the only
+  one it knows, or prints the list and exits with status 2.
+- The standard controls a camera has are read from the control bitmaps (`bmControls`) of its camera terminal and
+  processing unit. `show`, `--json`, `save`, `defaults` and `snapshot` list only what the camera declares, with its
+  own ranges (`GET_MIN`, `GET_MAX`, `GET_RES`, `GET_DEF`). New controls: `hue`, `hueauto`, `gamma`, `iris`, `roll` and
+  `privacy`. `ae` also takes `shutter` and `flicker` also `off` and `auto` where the camera lists them. See
+  `docs/registers.md`.
+- `hdr` and `backlight` are one control (UVC backlight compensation). It is called `hdr` on the Logitech models with an
+  HDR switch and `backlight` on the others, and both names, and both styles of value (`on` and `off`, or numbers),
+  work on every camera.
+- `pan` and `tilt` accept decimals, rounded to the camera's unit (arc seconds). The MX Brio may accept whole degrees
+  only.
+- `privacy` is only set on purpose, by name on the command line or by `apply`: `save` does not write it, `defaults`
+  does not reset it and `watch` does not apply it.
 - Experimental support for the Logitech Brio (`085e`), Brio 500 (`0943`), Brio 501 (`0946`), Brio 505 (`0919`) and
-  Brio 4K Stream Edition (`086b`), from what other projects report: the field of view on all of them, Show Mode on the
-  Brio 500. Extension units are written only on models of this table, only after `GET_LEN` and the `SET` bit of
+  Brio 4K Stream Edition (`086b`), from what other projects report (cameractrls v0.6.10 and OpenLogi issue 1222) and
+  not tested with brioctl: the field of view on all of them, Show Mode on the Brio 500. `brioctl snapshot` reports
+  are welcome. Extension units are written only on models of this table, only after `GET_LEN` and the write bit of
   `GET_INFO` agree, and never with a value taken from `GET_MAX`.
-- `watch` follows the chosen camera (vendor id, product id and serial number) and detects video start for every
-  camera through CoreMediaIO (`DeviceIsRunningSomewhere`, no camera permission needed), next to the MX Brio HID report.
-  Without `--camera` it still waits for the MX Brio when no Logitech camera is connected.
-- `save` writes a `# camera VID:PID SERIAL` line and `apply` warns about a file from another model.
-- `--json`: `device` gains `vid`, `pid`, `support`, `index`, `location` and `name`; every setting gains `group`,
-  `writable`, `kind`, `help` and `min`, `max`, `step` or `choices`. New: `profiles --json`.
-- `factory-reset` works on the MX Brio only. `dump` reads no value of an unknown extension unit. JSON strings from USB
-  descriptors are escaped as UTF-8.
-- Snapshots have `device`, `name` and `serial` lines (snapshots from 1.0 still load); `BRIOCTL_FAKE` takes several
-  snapshots separated by `:`; `make fixtures` writes the generic and Brio 500 test cameras.
+- `save` writes a `# camera VID:PID SERIAL` line, and `apply` warns about a file saved from another model.
+- `watch` works with any camera. It sees video start through CoreMediaIO (`DeviceIsRunningSomewhere`, no camera
+  permission needed) as well as through the MX Brio's HID report, and one start gives one apply. It follows the chosen
+  camera, found again after a reconnect by vendor id, product id and serial number. Without `--camera` it follows the
+  only camera with full support, or else the only one with experimental support; with no such camera, or no clear
+  choice, it says why once and waits.
+- `--json` contract for scripts and the app: `device` has `vid`, `pid`, `name`, `support`, `index` and `location`;
+  every setting has `value`, `default`, `auto`, `writable`, `group`, `kind` (`number`, `choice` or `bool`), `help` and
+  `min`, `max`, `step` or `choices`; the four `status` fields are null on cameras other than the MX Brio; boolean
+  values are the strings `"on"` and `"off"`. New: `list --json` and `profiles --json`.
 - `import optionsplus [DB] [--save NAME]` turns the camera settings saved by Logi Options+ (2.9, `settings.db` in
-  `~/Library/Application Support/LogiOptionsPlus`) into a settings file for `apply`: on stdout, or in
+  `~/Library/Application Support/LogiOptionsPlus`) into a settings file for `apply`, on stdout or in
   `~/.config/brioctl/NAME`. It needs no camera and opens the database read-only and immutable, with SQLite's JSON
-  functions (brioctl now links the system `libsqlite3`). Up to twenty settings come from the selected presets;
-  manual exposure and gain, manual focus, pan and tilt away from the centre, RightSight and the app's own options are
-  listed as `# skipped:` lines, manual white balance is taken with a `# check:` line. See the README.
+  functions. Up to 21 settings come from the selected presets; manual exposure and gain, manual focus, pan and tilt
+  away from the centre, RightSight and the app's own options are listed as `# skipped:` lines, and manual white
+  balance is taken with a `# check:` line. It warns when `settings.db-wal` exists, because Logi Options+ is then
+  running and its latest changes are not read. Logi Tune keeps no settings file and cannot be imported.
 - Menu bar app, `brioctl.app` (macOS 13 or later, universal, ad-hoc signed and not notarized). A window with the
   settings of the chosen camera, drawn from `brioctl --json` (switches, menus, sliders with the camera's own ranges), a
   camera picker, presets, saved files and "Save current as...". It runs the brioctl inside the app and never opens the
@@ -49,6 +62,29 @@
   command-line tool. CI tests and builds the app, checks its signature and architectures, and attaches
   `brioctl-app-VERSION.zip` to the release next to the tarball. The Homebrew formula moves to v1.1.0, and a cask
   `brioctl-app` is drafted in `packaging/`.
+- Snapshots have `device`, `name` and `serial` lines (snapshots from 1.0 still load). `BRIOCTL_FAKE` takes several
+  snapshots separated by `:`, and `make fixtures` writes a generic UVC camera, one with more standard controls and a
+  simulated Brio 500 for the tests.
+
+### Changed
+
+- A number is written only inside the `GET_MIN` to `GET_MAX` range the camera reports. A control that reports no range
+  is refused (`range unknown, not writing`), and `save` leaves such a number out. A standard control that `GET_INFO`
+  says cannot be written is refused too.
+- `show` prints what the camera accepts: ranges and the names of values come from the camera, not from a fixed text.
+  `brioctl help` lists every setting name. `brightness` is signed, as UVC defines it.
+- `factory-reset` refuses every camera but the MX Brio. `dump` asks every register of an extension unit it does not
+  know only for `GET_INFO` and `GET_LEN`.
+- brioctl links the system `libsqlite3` and the CoreMediaIO framework.
+
+### Fixed
+
+- JSON strings from USB descriptors (product name, serial number) with non-ASCII characters were escaped byte by byte
+  and came out as the wrong characters. Valid UTF-8 now becomes `\uXXXX` escapes and anything else U+FFFD.
+- A number that overflowed when scaled (`pan` and `tilt` are multiplied by 3600) could wrap into the range and be
+  written. It is refused now.
+- With two MX Brios connected, `watch` reacted to the HID video report of either one. It listens only to the camera it
+  follows.
 
 ## 1.0.0 — 2026-11-01
 
