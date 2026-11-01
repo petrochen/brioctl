@@ -242,6 +242,18 @@ static CFMutableDictionaryRef vidPid(CFMutableDictionaryRef m, CFStringRef vidKe
     return m;
 }
 
+// Matching dictionary for the VideoControl interface (class 0x0e, subclass 1) of every UVC camera.
+static CFMutableDictionaryRef videoControlMatching(void) {
+    int cls = 0x0e, sub = 1;
+    CFMutableDictionaryRef m = IOServiceMatching("IOUSBHostInterface");
+    CFNumberRef nc = CFNumberCreate(NULL, kCFNumberIntType, &cls), ns = CFNumberCreate(NULL, kCFNumberIntType, &sub);
+    CFDictionarySetValue(m, CFSTR("bInterfaceClass"), nc);
+    CFDictionarySetValue(m, CFSTR("bInterfaceSubClass"), ns);
+    CFRelease(nc);
+    CFRelease(ns);
+    return m;
+}
+
 // The descriptor at offset i of the configuration descriptor, NULL at the end or if it would run past it. Callers
 // still check d[0] against the fields they read.
 static const uint8_t *descAt(const Cam *c, int i) {
@@ -314,12 +326,14 @@ static void usbString(io_service_t s, CFStringRef key, char *out, size_t n) {
 #ifdef BRIOCTL_FAKE
 // A camera read from a snapshot file (brioctl snapshot) so the tests run without hardware. SET_CUR stores the value
 // and closeCam writes the file back, so separate brioctl processes see each other's writes. BRIOCTL_FAKE may name
-// several snapshots separated by ':': several cameras, at USB locations 0x100000, 0x200000, ...
+// several snapshots separated by ':': several cameras, at USB locations 0x100000, 0x200000, ... in the order given, or
+// where a snapshot's own "location 0x..." line puts them.
 #define FAKE_REGS 128
 
 static struct {
     Reg reg[FAKE_REGS];
-    int nreg, dirty, hasMic, hasDevice, vid, pid;
+    int nreg, dirty, hasMic, hasDevice, hasLoc, vid, pid;
+    unsigned loc;
     Float32 mic;
     char path[PATH_MAX], head[256], name[64], serial[48];
     uint8_t *desc;
@@ -370,6 +384,11 @@ static int fakeLine(char *line) {
         fk.hasDevice = 1;
     } else if (!strcmp(tok, "serial") && a) {
         snprintf(fk.serial, sizeof fk.serial, "%s", a);
+    } else if (!strcmp(tok, "location") && a) {
+        char *end;
+        fk.loc = (unsigned)strtoul(a, &end, 0);
+        if (*end) return -1;
+        fk.hasLoc = 1;
     } else if (!strcmp(tok, "micgain") && a) {
         fk.hasMic = 1;
         fk.mic = strtof(a, NULL);
@@ -443,7 +462,7 @@ static int scanCameras(CamInfo *l, int max) {
         memset(&l[i], 0, sizeof l[i]);
         l[i].vid = fk.vid;
         l[i].pid = fk.pid;
-        l[i].loc = (unsigned)(i + 1) << 20;
+        l[i].loc = fk.hasLoc ? fk.loc : (unsigned)(i + 1) << 20;
         l[i].slot = i;
         snprintf(l[i].name, sizeof l[i].name, "%s", fk.name);
         snprintf(l[i].serial, sizeof l[i].serial, "%s", fk.serial);
@@ -460,6 +479,7 @@ static int fakeSave(void) {
     if (fk.hasDevice) fprintf(f, "device %04x %04x\n", fk.vid, fk.pid);
     if (fk.name[0] && fk.hasDevice) fprintf(f, "name %s\n", fk.name);
     if (fk.serial[0]) fprintf(f, "serial %s\n", fk.serial);
+    if (fk.hasLoc) fprintf(f, "location 0x%x\n", fk.loc);
     if (fk.descLen) {
         fprintf(f, "descriptor ");
         hex(f, fk.desc, fk.descLen);
@@ -564,15 +584,9 @@ static int closeCam(Cam *c) {
 
 // Every USB device with a VideoControl interface (class 0x0e, subclass 1), one entry per device.
 static int scanCameras(CamInfo *l, int max) {
-    int n = 0, cls = 0x0e, sub = 1;
-    CFMutableDictionaryRef m = IOServiceMatching("IOUSBHostInterface");
-    CFNumberRef nc = CFNumberCreate(NULL, kCFNumberIntType, &cls), ns = CFNumberCreate(NULL, kCFNumberIntType, &sub);
-    CFDictionarySetValue(m, CFSTR("bInterfaceClass"), nc);
-    CFDictionarySetValue(m, CFSTR("bInterfaceSubClass"), ns);
-    CFRelease(nc);
-    CFRelease(ns);
+    int n = 0;
     io_iterator_t it;
-    if (IOServiceGetMatchingServices(kIOMainPortDefault, m, &it)) return 0;
+    if (IOServiceGetMatchingServices(kIOMainPortDefault, videoControlMatching(), &it)) return 0;
     for (io_service_t ifc; (ifc = IOIteratorNext(it)); IOObjectRelease(ifc)) {
         io_service_t dev;
         if (IORegistryEntryGetParentEntry(ifc, kIOServicePlane, &dev)) continue;
@@ -687,17 +701,23 @@ static void dropCameras(CamInfo *l, int n) {
         if (l[i].svc) IOObjectRelease(l[i].svc);
 }
 
-// The camera in l that is the target: same ids and serial, and the same location if there is a choice. -1 if it is
-// gone.
+// Is the camera a at ids, serial and location the target? A camera with a serial number is found again on any port;
+// one without has only its location to be told apart from another of the same make.
+static int isTarget(const CamInfo *a) {
+    if (a->vid != target.vid || a->pid != target.pid) return 0;
+    return target.serial[0] ? !strcmp(a->serial, target.serial) : a->loc == target.loc;
+}
+
+// The camera in l that is the target, -1 if it is gone. Never a guess: with a serial number the same location is
+// preferred, and a serial shared by several cameras that are all elsewhere is nobody; without one the location decides.
 static int findTarget(const CamInfo *l, int n) {
-    int best = -1;
+    int found = -1, same = 0;
     for (int i = 0; i < n; i++) {
-        if (l[i].vid != target.vid || l[i].pid != target.pid) continue;
-        if (target.serial[0] && strcmp(l[i].serial, target.serial)) continue;
+        if (!isTarget(&l[i])) continue;
         if (l[i].loc == target.loc) return i;
-        if (best < 0) best = i;
+        found = i, same++;
     }
-    return best;
+    return same == 1 ? found : -1;
 }
 
 static const char *camName(const CamInfo *ci) {
@@ -738,6 +758,25 @@ static void printCameras(FILE *f, const CamInfo *l, int n) {
 
 static int allDigits(const char *s) { return *s && strspn(s, "0123456789") == strlen(s); }
 
+// The camera an ID names: an index, a location (0x...) or a serial number. Returns how many cameras it names (0, 1, or
+// 2 for several with that serial) and the position of the last one in *pick.
+static int matchId(const CamInfo *l, int n, const char *id, int *pick) {
+    int found = 0;
+    *pick = -1;
+    if (!strncmp(id, "0x", 2) || !strncmp(id, "0X", 2)) {
+        char *end;
+        unsigned long loc = strtoul(id, &end, 16);
+        for (int i = 0; i < n; i++)
+            if (!*end && end > id + 2 && l[i].loc == loc) *pick = i, found = 1;
+    } else if (allDigits(id) && strlen(id) < 4 && atoi(id) >= 1 && atoi(id) <= n) {
+        *pick = atoi(id) - 1;
+        found = 1;
+    } else
+        for (int i = 0; i < n; i++)
+            if (l[i].serial[0] && !strcasecmp(l[i].serial, id)) found++, *pick = i;
+    return found;
+}
+
 // Which camera does the user mean? ID is an index, a location (0x...) or a serial number; without ID: the only camera,
 // or the only one brioctl knows (full or experimental support). Returns 0 and the position in *pick, or the exit code
 // after saying why not.
@@ -748,18 +787,7 @@ static int chooseCamera(const CamInfo *l, int n, const char *id, int *pick) {
         return 1;
     }
     if (id) {
-        int found = 0;
-        if (!strncmp(id, "0x", 2) || !strncmp(id, "0X", 2)) {
-            char *end;
-            unsigned long loc = strtoul(id, &end, 16);
-            for (int i = 0; i < n; i++)
-                if (!*end && end > id + 2 && l[i].loc == loc) *pick = i, found = 1;
-        } else if (allDigits(id) && strlen(id) < 4 && atoi(id) >= 1 && atoi(id) <= n) {
-            *pick = atoi(id) - 1;
-            found = 1;
-        } else
-            for (int i = 0; i < n; i++)
-                if (l[i].serial[0] && !strcasecmp(l[i].serial, id)) found++, *pick = i;
+        int found = matchId(l, n, id, pick);
         if (found == 1) return 0;
         fprintf(stderr, found ? "serial %s matches several cameras: use the index or the location\n"
                               : "no camera matches %s (an index, a serial number or a location like 0x110000)\n", id);
@@ -852,6 +880,7 @@ static int getInfo(Cam *c, const Ctrl *k) {
 static int micRead(Float32 *g) { return micGain(g, NULL) || !isfinite(*g) ? -1 : 0; }
 
 static int quiet;    // watch: a setting that already has the value is not printed; real writes always are
+static int watching; // watch: what is only set on purpose (privacy) is left alone
 static int written;  // settings really written so far (watch counts them for its log line)
 static int videoOn;  // watch, video just started: mic is never changed (the camera restarts in the middle of a call)
 static int deskOn;   // watch, the camera shows the desk: the firmware sets fov, zoom, pan and tilt itself
@@ -908,6 +937,28 @@ static int choicesOf(Cam *c, const Ctrl *k, const Map **out, int display) {
     return n;
 }
 
+// hdr and backlight are one control; whichever name the file uses, on and off mean 1 and 0 where the camera has a
+// number.
+static int isBacklight(const Ctrl *k) { return k->unit == U_PU && k->sel == 0x01; }
+
+// A plain decimal for a scaled control (pan and tilt are in degrees: 1.99 is allowed), rounded to the nearest register
+// unit. No exponents, hex, nan or inf. 0 and *raw, or -1 if it is not a number or does not fit a long once scaled.
+static int parseScaled(const char *arg, long scale, long *raw) {
+    const char *p = arg + (*arg == '+' || *arg == '-');
+    size_t whole = strspn(p, "0123456789"), frac = 0;
+    p += whole;
+    if (*p == '.') {
+        p++;
+        frac = strspn(p, "0123456789");
+        p += frac;
+    }
+    if (*p || whole + frac == 0) return -1;
+    double scaled = strtod(arg, NULL) * scale;
+    if (!(fabs(scaled) < (double)LONG_MAX / 2)) return -1;  // also false for inf and nan
+    *raw = lround(scaled);
+    return 0;
+}
+
 static int parseValue(Cam *c, const Ctrl *k, const char *arg, long *raw) {
     if (k->map) {
         const Map *ch[MAP_MAX];
@@ -916,11 +967,24 @@ static int parseValue(Cam *c, const Ctrl *k, const char *arg, long *raw) {
             if (!strcmp(ch[i]->name, arg)) { *raw = ch[i]->raw; return 0; }
         return -1;
     }
+    if (isBacklight(k) && (!strcmp(arg, "on") || !strcmp(arg, "off"))) {
+        *raw = !strcmp(arg, "on");
+        return 0;
+    }
+    if (scaleOf(k) > 1) return parseScaled(arg, scaleOf(k), raw);
     char *end;
+    errno = 0;
     long v = strtol(arg, &end, 10);
-    if (!*arg || *end) return -1;
-    *raw = v * scaleOf(k);
+    if (!*arg || *end || errno == ERANGE) return -1;
+    *raw = v;
     return 0;
+}
+
+// Does the value fit the control's field (signed or unsigned, size bytes)?
+static int fits(long v, int size, int sgn) {
+    if (size >= (int)sizeof v) return sgn || v >= 0;
+    long top = 1L << (8 * size - (sgn ? 1 : 0));
+    return sgn ? v >= -top && v < top : v >= 0 && v < top;
 }
 
 static void formatValue(const Ctrl *k, long raw, char *s, size_t n) {
@@ -928,8 +992,11 @@ static void formatValue(const Ctrl *k, long raw, char *s, size_t n) {
         for (const Map *m = k->map; m->name; m++)
             if (m->raw == raw) { snprintf(s, n, "%s", m->name); return; }
         snprintf(s, n, "raw %ld", raw);
-    } else if (raw % scaleOf(k)) {
-        snprintf(s, n, "%.2f", (double)raw / scaleOf(k));
+    } else if (raw % scaleOf(k)) {  // as few decimals as it takes to read back as the same register value
+        for (int d = 2; d <= 4; d++) {
+            snprintf(s, n, "%.*f", d, (double)raw / scaleOf(k));
+            if (lround(strtod(s, NULL) * scaleOf(k)) == raw) break;
+        }
     } else {
         snprintf(s, n, "%ld", raw / scaleOf(k));
     }
@@ -1185,8 +1252,8 @@ static int showJson(Cam *c) {
     jstr(ci->model);
     printf(",\"firmware\":");
     jstr(s.fw[0] ? s.fw : NULL);
-    printf(",\"serial\":");
-    jstr(s.sn[0] ? s.sn : ci->serial[0] ? ci->serial : NULL);
+    printf(",\"serial\":");  // the one list and --camera use; the camera's own register only if USB has none
+    jstr(ci->serial[0] ? ci->serial : s.sn[0] ? s.sn : NULL);
     printf(",\"colour\":");
     jint(s.colour);
     printf(",\"name\":");
@@ -1343,13 +1410,26 @@ static int set(Cam *c, const char *name, const char *arg) {
         fprintf(stderr, "%s: set automatically right now (%s)\n", name, help);
         return -1;
     }
+    // A number is written only inside a range the camera has just told: without GET_MIN and GET_MAX nothing says what
+    // the control takes.
     Range r;
     getRange(c, k, &r);
-    if (!k->map && ((r.hasMin && raw < r.min) || (r.hasMax && raw > r.max))) {
-        char rg[32];
-        rangeText(c, k, rg, sizeof rg);
-        fprintf(stderr, "%s: %s is out of range (%s)\n", name, arg, rg);
-        return -1;
+    if (!k->map) {
+        if (!r.hasMin || !r.hasMax) {
+            fprintf(stderr, "%s: range unknown, not writing\n", name);
+            return -1;
+        }
+        if (raw < r.min || raw > r.max) {
+            char rg[32];
+            rangeText(c, k, rg, sizeof rg);
+            fprintf(stderr, "%s: %s is out of range (%s)\n", name, arg, rg);
+            return -1;
+        }
+        if (!fits(raw, fieldSize(k), k->sgn)) {  // the range is read from the same field, so this is a second lock
+            fprintf(stderr, "%s: %s does not fit the control (%d byte%s)\n", name, arg, fieldSize(k),
+                    fieldSize(k) == 1 ? "" : "s");
+            return -1;
+        }
     }
     // A field shares the control with others: keep their current values.
     uint8_t b[8] = {0};
@@ -1406,6 +1486,10 @@ static const char *presetSettings(const char *name) {
     return NULL;
 }
 
+// What is only ever set on purpose, by name on the command line (or in a file somebody wrote): not saved, not reset by
+// defaults, not applied by watch. The privacy shutter is not a preference.
+static int explicitOnly(const char *name) { return !strcmp(name, "privacy"); }
+
 static int save(Cam *c, const char *name) {
     char path[PATH_MAX];
     if (presetSettings(name)) { fprintf(stderr, "%s is a built-in preset, choose another name\n", name); return 1; }
@@ -1422,13 +1506,16 @@ static int save(Cam *c, const char *name) {
     int n = 0;
     for (int i = 0; i < NCTRLS; i++) {
         const Ctrl *k = &CTRLS[i];
-        long cur, min, max;
+        long cur;
         char s[16];
-        int info = avail(c, k) ? getInfo(c, k) : -1;
+        Range r;
+        int info = avail(c, k) && !explicitOnly(k->name) ? getInfo(c, k) : -1;
         // Skip what cannot be set now: values driven by an auto mode are saved as that mode.
         if (info < 0 || !(info & INFO_SET) || (info & INFO_AUTO) || getField(c, k, GET_CUR, &cur)) continue;
-        // and values outside the camera's own range, which apply would refuse
-        if (!getField(c, k, GET_MIN, &min) && !getField(c, k, GET_MAX, &max) && (cur < min || cur > max)) continue;
+        // and values outside the camera's own range, or a number without a range, which apply would refuse
+        getRange(c, k, &r);
+        if (!k->map && !(r.hasMin && r.hasMax)) continue;
+        if (r.hasMin && r.hasMax && (cur < r.min || cur > r.max)) continue;
         formatValue(k, cur, s, sizeof s);
         fprintf(f, "%s %s\n", k->name, s);
         n++;
@@ -1473,7 +1560,7 @@ static void checkCamera(const Cam *c, const char *line) {
 }
 
 static int applyStream(Cam *c, FILE *f) {
-    char line[256], name[64], value[64], mic[64] = "", skipped[64] = "";
+    char line[256], name[64], value[64], mic[64] = "", skipped[64] = "", held[64] = "";
     int rc = 0;
     while (fgets(line, sizeof line, f)) {
         if (!strncmp(line, "# camera ", 9)) checkCamera(c, line);
@@ -1481,7 +1568,10 @@ static int applyStream(Cam *c, FILE *f) {
         if (hash) *hash = 0;
         if (sscanf(line, "%63s %63s", name, value) != 2) continue;
         if (setLast(name)) snprintf(mic, sizeof mic, "%s", value);
-        else if (deskOn && isFraming(name)) {
+        else if (watching && explicitOnly(name)) {
+            size_t n = strlen(held);
+            snprintf(held + n, sizeof held - n, " %s", name);
+        } else if (deskOn && isFraming(name)) {
             size_t n = strlen(skipped);
             snprintf(skipped + n, sizeof skipped - n, " %s", name);
         } else if (set(c, name, value)) rc = 1;
@@ -1489,6 +1579,10 @@ static int applyStream(Cam *c, FILE *f) {
     if (*skipped) {
         stamp();
         printf("camera shows the desk, left to the firmware:%s\n", skipped);
+    }
+    if (*held) {
+        stamp();
+        printf("not applied by watch, set by hand only:%s\n", held);
     }
     if (*mic && !videoOn) {
         if (set(c, "mic", mic)) rc = 1;
@@ -1566,14 +1660,16 @@ static int profiles(int json) {
 }
 
 // Camera's own defaults (GET_DEF) for every control the camera has except mic and showmode: for those two GET_DEF
-// says off, but a real factory reset leaves them on. Nothing restarts and Logitech's hidden state is left alone.
+// says off, but a real factory reset leaves them on. Nor privacy: the shutter is not a setting to reset. Nothing
+// restarts and Logitech's hidden state is left alone.
 static int defaults(Cam *c) {
     int rc = 0;
     for (int i = 0; i < NCTRLS; i++) {
         const Ctrl *k = &CTRLS[i];
         long def;
         char s[16];
-        if (!avail(c, k) || !strcmp(k->name, "mic") || !strcmp(k->name, "showmode")) continue;
+        if (!avail(c, k) || !strcmp(k->name, "mic") || !strcmp(k->name, "showmode") || explicitOnly(k->name))
+            continue;
         int info = getInfo(c, k);
         if (info < 0 || !(info & INFO_SET) || (info & INFO_AUTO) || getField(c, k, GET_DEF, &def)) continue;
         formatValue(k, def, s, sizeof s);
@@ -1583,13 +1679,37 @@ static int defaults(Cam *c) {
 }
 
 static char watchPath[PATH_MAX];
+static const char *watchCamId;  // watch --camera ID, NULL without
+
+// The "# camera VID:PID" line of a settings file: 1 and the ids if there is one.
+static int fileCamera(const char *path, unsigned *vid, unsigned *pid) {
+    FILE *f = fopen(path, "r");
+    char line[256];
+    int found = 0;
+    while (f && !found && fgets(line, sizeof line, f))
+        found = !strncmp(line, "# camera ", 9) && sscanf(line, "# camera %x:%x", vid, pid) == 2;
+    if (f) fclose(f);
+    return found;
+}
 
 // Apply the watch file quietly and end with one log line. A starting camera may not answer yet: retry.
 // video: video has just started, so mic is left alone. While the camera shows the desk, framing is left alone too.
+// A file saved from another model is not applied at all (apply by hand does that, with a warning): watch would do it
+// at every connect and every video start, to a camera nobody chose it for.
 static void reapply(int attempts, int waitFirst, int video) {
+    unsigned vid, pid;
     quiet = 1;
+    watching = 1;
     videoOn = video;
     written = 0;
+    if (fileCamera(watchPath, &vid, &pid) && ((int)vid != target.vid || (int)pid != target.pid)) {
+        if (!video) {  // said once per connect, not at every video start
+            stamp();
+            printf("settings were saved from %04x:%04x; not applying them to %04x:%04x (save them from this camera)\n",
+                   vid, pid, target.vid, target.pid);
+        }
+        return;
+    }
     for (int attempt = 1; attempt <= attempts; attempt++) {
         if (attempt > 1 || waitFirst) sleep(2);  // give the camera time to start
         Cam c;
@@ -1603,33 +1723,21 @@ static void reapply(int attempts, int waitFirst, int video) {
     printf("could not apply all settings (%d changed)\n", written);
 }
 
-// USB devices with the target's vendor and product id; the target's serial number is checked when one arrives.
-static CFMutableDictionaryRef cameraMatching(void) {
-    return vidPid(IOServiceMatching("IOUSBHostDevice"), CFSTR("idVendor"), CFSTR("idProduct"), target.vid, target.pid);
-}
-
-static void cameraArrived(void *refcon, io_iterator_t it) {
-    (void)refcon;
-    int arrived = 0;
-    for (io_service_t s; (s = IOIteratorNext(it)); IOObjectRelease(s)) {
-        char serial[48];
-        usbString(s, CFSTR("USB Serial Number"), serial, sizeof serial);
-        if (target.serial[0] && strcmp(serial, target.serial)) continue;
-        target.loc = (unsigned)usbNumber(s, CFSTR("locationID"));  // it may be on another port now
-        arrived = 1;
-    }
-    if (!arrived) return;
-    stamp();
-    printf("%s connected, applying %s\n", camName(&target), watchPath);
-    reapply(5, 1, 0);
-}
-
-// The camera sends HID input report 0x40 when video starts: 0x10, then 0x02 about 160 ms later (and 0x14 about 3 s
-// after it stops). The image settings can be lost with the stream, so apply the file again once it has settled.
+// Video start, seen by the HID report or by CoreMediaIO, whichever is first. The camera sends the report 0x10 and then
+// 0x02 about 160 ms later (and 0x14 about 3 s after the stream stops). The image settings can be lost with the stream,
+// so apply the file again once it has settled.
 #define HID_STREAM_REPORT 0x40
 #define VIDEO_SETTLE_SECONDS 2.0
 static CFRunLoopTimerRef videoTimer;
 static CFAbsoluteTime lastVideoApply;  // when the last apply for a video start ended
+
+static double settleSeconds(void) {
+#ifdef BRIOCTL_FAKE
+    const char *s = getenv("BRIOCTL_FAKE_SETTLE");  // tests: do not wait two seconds
+    if (s && *s) return atof(s);
+#endif
+    return VIDEO_SETTLE_SECONDS;
+}
 
 static void videoSettled(CFRunLoopTimerRef timer, void *info) {
     (void)timer;
@@ -1646,9 +1754,15 @@ static void armVideoTimer(void) {  // every report restarts the wait, so one sta
         CFRunLoopTimerInvalidate(videoTimer);
         CFRelease(videoTimer);
     }
-    CFAbsoluteTime when = CFAbsoluteTimeGetCurrent() + VIDEO_SETTLE_SECONDS;
+    CFAbsoluteTime when = CFAbsoluteTimeGetCurrent() + settleSeconds();
     videoTimer = CFRunLoopTimerCreate(NULL, when, 0, 0, 0, videoSettled, NULL);
     CFRunLoopAddTimer(CFRunLoopGetCurrent(), videoTimer, kCFRunLoopDefaultMode);
+}
+
+// One video start gives one apply, whichever of HID and CoreMediaIO says so first (and whatever the other says later,
+// up to a second after the apply is done).
+static void videoStartSeen(void) {
+    if (CFAbsoluteTimeGetCurrent() - lastVideoApply > settleSeconds() + 1.0) armVideoTimer();
 }
 
 static void hidReport(void *ctx, IOReturn result, void *sender, IOHIDReportType type, uint32_t id, uint8_t *report,
@@ -1657,10 +1771,12 @@ static void hidReport(void *ctx, IOReturn result, void *sender, IOHIDReportType 
     (void)sender;
     if (result || type != kIOHIDReportTypeInput || id != HID_STREAM_REPORT || len < 1) return;
     uint8_t code = len > 1 && report[0] == id ? report[1] : report[0];  // the buffer may start with the report ID
-    if (code == 0x10 || code == 0x02) armVideoTimer();
+    if (code == 0x10 || code == 0x02) videoStartSeen();
 }
 
-static int hidDevices;  // HID devices of the camera that are present now
+static IOHIDManagerRef hidMgr;  // listens to the HID interface of the target camera, NULL if it does not
+static unsigned hidLoc;         // the USB location it listens at
+static int hidDevices;          // HID devices of the camera that are present now
 
 // The log shows whether video-start detection is armed after the camera has restarted: one line per camera, not per
 // HID device.
@@ -1682,6 +1798,49 @@ static void hidRemoved(void *ctx, IOReturn result, void *sender, IOHIDDeviceRef 
     if (hidDevices <= 0 || --hidDevices) return;
     stamp();
     printf("HID device removed\n");
+}
+
+static void hidStop(void) {
+    if (!hidMgr) return;
+    IOHIDManagerUnscheduleFromRunLoop(hidMgr, CFRunLoopGetCurrent(), kCFRunLoopDefaultMode);
+    IOHIDManagerClose(hidMgr, kIOHIDOptionsTypeNone);
+    CFRelease(hidMgr);
+    hidMgr = NULL;
+    hidDevices = 0;
+}
+
+// Listen to the HID interface of the target camera without seizing it; never sends or requests a report. Only the MX
+// Brio sends the report. The manager is told the camera's USB location (a HID device has the LocationID of the USB
+// device it belongs to), so with several MX Brios only the one being watched is heard; it listens again if the camera
+// comes back on another port.
+static void hidSetup(void) {
+    if (target.vid != VID_LOGITECH || target.pid != PID_MXBRIO) return;
+    if (hidMgr && hidLoc == target.loc) return;
+    hidStop();
+    int loc = (int)target.loc;
+    IOHIDManagerRef mgr = IOHIDManagerCreate(kCFAllocatorDefault, kIOHIDOptionsTypeNone);
+    CFMutableDictionaryRef m =
+        CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    CFNumberRef nl = CFNumberCreate(NULL, kCFNumberIntType, &loc);
+    vidPid(m, CFSTR(kIOHIDVendorIDKey), CFSTR(kIOHIDProductIDKey), target.vid, target.pid);
+    CFDictionarySetValue(m, CFSTR(kIOHIDLocationIDKey), nl);
+    CFRelease(nl);
+    IOHIDManagerSetDeviceMatching(mgr, m);
+    CFRelease(m);
+    IOHIDManagerRegisterDeviceMatchingCallback(mgr, hidAdded, NULL);
+    IOHIDManagerRegisterDeviceRemovalCallback(mgr, hidRemoved, NULL);
+    IOHIDManagerRegisterInputReportCallback(mgr, hidReport, NULL);
+    IOHIDManagerScheduleWithRunLoop(mgr, CFRunLoopGetCurrent(), kCFRunLoopDefaultMode);
+    IOReturn kr = IOHIDManagerOpen(mgr, kIOHIDOptionsTypeNone);
+    if (!kr) {
+        hidMgr = mgr;
+        hidLoc = target.loc;
+        return;
+    }
+    stamp();
+    printf("warning: cannot listen for video start (HID open failed 0x%x), applying on connect only\n", kr);
+    IOHIDManagerUnscheduleFromRunLoop(mgr, CFRunLoopGetCurrent(), kCFRunLoopDefaultMode);
+    CFRelease(mgr);
 }
 
 // Video start for every camera, through CoreMediaIO. macOS lists each camera there. For a USB UVC camera the device UID
@@ -1745,14 +1904,15 @@ static CMIOObjectID cmioFind(char *uid, size_t n) {
 static void cmioChanged(CMIOObjectID id) {
     if (id != cmioDev) return;
     int now = cmioRunningNow(id);
-    // the HID report of the MX Brio comes with the same start: one apply for both
-    if (now && !cmioRunning && CFAbsoluteTimeGetCurrent() - lastVideoApply > 3.0) armVideoTimer();
+    if (now && !cmioRunning) videoStartSeen();
     cmioRunning = now;
 }
 
-// Listen to the target camera in CoreMediaIO if it is there and we do not already; called when devices come and go.
+// Listen to the target camera in CoreMediaIO if it is there and we do not already; called when devices come and go
+// and when the camera has just connected (CoreMediaIO lists it a moment later than USB does, or earlier).
 static void cmioSync(void) {
     char uid[64] = "";
+    if (!target.vid) return;  // no camera to follow yet
     CMIOObjectID id = cmioFind(uid, sizeof uid);
     if (id == cmioDev) return;
     cmioDev = id;
@@ -1766,8 +1926,10 @@ static void cmioSync(void) {
                                                          (void)changed;
                                                          cmioChanged(id);
                                                      });
-    if (st) printf("warning: cannot listen to CoreMediaIO (%d)\n", (int)st);
-    else printf("CoreMediaIO listening (%s)\n", uid);
+    if (st) {
+        cmioDev = 0;  // not listening: the next sync tries again
+        printf("warning: cannot listen to CoreMediaIO (%d)\n", (int)st);
+    } else printf("CoreMediaIO listening (%s)\n", uid);
 }
 
 static void cmioWatch(void) {
@@ -1785,50 +1947,105 @@ static void cmioWatch(void) {
     cmioSync();
 }
 
-// Listen to the camera's HID interface without seizing it; never sends or requests a report.
-static void watchVideo(void) {
-    IOHIDManagerRef mgr = IOHIDManagerCreate(kCFAllocatorDefault, kIOHIDOptionsTypeNone);
-    CFMutableDictionaryRef m =
-        CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-    IOHIDManagerSetDeviceMatching(
-        mgr, vidPid(m, CFSTR(kIOHIDVendorIDKey), CFSTR(kIOHIDProductIDKey), target.vid, target.pid));
-    CFRelease(m);
-    IOHIDManagerRegisterDeviceMatchingCallback(mgr, hidAdded, NULL);
-    IOHIDManagerRegisterDeviceRemovalCallback(mgr, hidRemoved, NULL);
-    IOHIDManagerRegisterInputReportCallback(mgr, hidReport, NULL);
-    IOHIDManagerScheduleWithRunLoop(mgr, CFRunLoopGetCurrent(), kCFRunLoopDefaultMode);
-    IOReturn kr = IOHIDManagerOpen(mgr, kIOHIDOptionsTypeNone);
-    if (!kr) return;
-    stamp();
-    printf("warning: cannot listen for video start (HID open failed 0x%x), applying on connect only\n", kr);
-    IOHIDManagerUnscheduleFromRunLoop(mgr, CFRunLoopGetCurrent(), kCFRunLoopDefaultMode);
-    CFRelease(mgr);
-}
+// Which camera watch follows. Without --camera: the one camera with full support (the MX Brio), else the one with
+// experimental support; never a camera brioctl does not know: a LaunchAgent started with the MX Brio unplugged must
+// not apply its settings to a FaceTime camera. With --camera: that camera. If there is none, or the choice is not
+// clear, watch says why and waits (it never exits: launchd would start it again at once) and looks again when a camera
+// comes or after a few seconds. Returns 1 with the camera in target, 0 if there is none yet, -1 if the cameras cannot
+// be listed.
+static char waitingWhy[200];  // the last reason said, so that the same one is said once
 
-// Which camera watch follows. Like the other commands, but without --camera it never settles for a camera brioctl does
-// not know: a LaunchAgent started with the MX Brio unplugged must not apply its settings to a FaceTime camera. With no
-// Logitech camera connected it waits for the MX Brio, as 1.0 did.
 static int watchTarget(const char *camId) {
     CamInfo l[MAX_CAMS];
-    int n = listCameras(l, MAX_CAMS), pick = -1, known = 0, rc = 0;
-    if (n < 0) return 1;
-    for (int i = 0; i < n; i++)
-        if (l[i].support != S_STANDARD) known++, pick = i;
-    if (!camId && !known) {
-        memset(&target, 0, sizeof target);
-        target.vid = VID_LOGITECH;
-        target.pid = PID_MXBRIO;
-        describe(&target);
-        if (n) {
-            stamp();
-            printf("no camera known to brioctl is connected, waiting for the MX Brio (--camera ID watches another)\n");
+    int n = listCameras(l, MAX_CAMS), pick = -1, full = 0, experimental = 0, pickFull = -1, pickExp = -1;
+    char why[sizeof waitingWhy] = "";
+    if (n < 0) return -1;
+    if (camId) {
+        int found = matchId(l, n, camId, &pick);
+        if (found != 1) pick = -1;
+        if (found > 1)
+            snprintf(why, sizeof why, "serial %s matches several cameras, waiting (use the index or the location)",
+                     camId);
+        else if (!found) snprintf(why, sizeof why, "camera %s is not connected, waiting for it", camId);
+    } else {
+        for (int i = 0; i < n; i++) {
+            if (l[i].support == S_FULL) full++, pickFull = i;
+            else if (l[i].support == S_EXPERIMENTAL) experimental++, pickExp = i;
         }
-    } else if (!(rc = chooseCamera(l, n, camId, &pick))) {
+        if (full == 1) pick = pickFull;
+        else if (!full && experimental == 1) pick = pickExp;
+        else if (full > 1 || experimental > 1)
+            snprintf(why, sizeof why, "several cameras with %s support, waiting (choose one with --camera ID)",
+                     full > 1 ? "full" : "experimental");
+        else
+            snprintf(why, sizeof why,
+                     "no camera known to brioctl is connected, waiting for one (--camera ID watches another)");
+    }
+    if (pick >= 0) {
         target = l[pick];
         target.svc = 0;
+        waitingWhy[0] = 0;
+    } else if (strcmp(why, waitingWhy)) {
+        snprintf(waitingWhy, sizeof waitingWhy, "%s", why);
+        stamp();
+        printf("%s\n", why);
     }
     dropCameras(l, n);
-    return rc;
+    return pick >= 0;
+}
+
+static CFRunLoopTimerRef retryTimer;  // while there is no camera to follow: look again now and then
+
+// A watch with no camera yet looks again. 1 if it has one now.
+static int watchRetry(void) {
+    if (target.vid || watchTarget(watchCamId) <= 0) return 0;
+    if (retryTimer) {
+        CFRunLoopTimerInvalidate(retryTimer);
+        CFRelease(retryTimer);
+        retryTimer = NULL;
+    }
+    stamp();
+    printf("watching for %s\n", camName(&target));
+    return 1;
+}
+
+// The target camera is connected: listen for its video, then apply the file.
+static void cameraConnected(void) {
+    hidSetup();
+    cmioSync();
+    stamp();
+    printf("%s connected, applying %s\n", camName(&target), watchPath);
+    reapply(5, 1, 0);
+}
+
+static void retryTarget(CFRunLoopTimerRef timer, void *info) {
+    (void)timer;
+    (void)info;
+    if (watchRetry()) cameraConnected();
+}
+
+// A UVC camera arrived (or is there when watch starts). If it is the target, apply the file.
+static void cameraArrived(void *refcon, io_iterator_t it) {
+    (void)refcon;
+    int arrived = 0, any = 0;
+    for (io_service_t ifc; (ifc = IOIteratorNext(it)); IOObjectRelease(ifc)) {
+        io_service_t dev;
+        CamInfo a;
+        any = 1;
+        if (IORegistryEntryGetParentEntry(ifc, kIOServicePlane, &dev)) continue;
+        memset(&a, 0, sizeof a);
+        a.vid = usbNumber(dev, CFSTR("idVendor"));
+        a.pid = usbNumber(dev, CFSTR("idProduct"));
+        a.loc = (unsigned)usbNumber(dev, CFSTR("locationID"));
+        usbString(dev, CFSTR("USB Serial Number"), a.serial, sizeof a.serial);
+        IOObjectRelease(dev);
+        if (target.vid && isTarget(&a)) {
+            target.loc = a.loc;  // it may be on another port now
+            arrived = 1;
+        }
+    }
+    if (any && watchRetry()) arrived = 1;  // no target yet: this may be the camera
+    if (arrived) cameraConnected();
 }
 
 // Apply a settings file now, every time the camera is connected again and whenever video starts (run it from a
@@ -1836,19 +2053,23 @@ static int watchTarget(const char *camId) {
 static int watch(const char *name, const char *camId) {
     configPath(name, watchPath, sizeof watchPath);
     setvbuf(stdout, NULL, _IOLBF, 0);
-    int rc = watchTarget(camId);
-    if (rc) return rc;
+    watchCamId = camId;
+    if (watchTarget(camId) < 0) return 1;
     IONotificationPortRef port = IONotificationPortCreate(kIOMainPortDefault);
     CFRunLoopAddSource(CFRunLoopGetCurrent(), IONotificationPortGetRunLoopSource(port), kCFRunLoopDefaultMode);
     io_iterator_t it;
-    if (IOServiceAddMatchingNotification(port, kIOFirstMatchNotification, cameraMatching(), cameraArrived, NULL, &it)) {
+    if (IOServiceAddMatchingNotification(port, kIOFirstMatchNotification, videoControlMatching(), cameraArrived, NULL,
+                                         &it)) {
         fprintf(stderr, "cannot watch for the camera\n");
         return 1;
     }
     stamp();
-    printf("watching for %s, settings %s\n", camName(&target), watchPath);
-    if (target.vid == VID_LOGITECH && target.pid == PID_MXBRIO) watchVideo();  // only it sends the HID report
-    cmioWatch();                                                                // every camera tells CoreMediaIO
+    printf("watching for %s, settings %s\n", target.vid ? camName(&target) : "a camera", watchPath);
+    if (!target.vid) {
+        retryTimer = CFRunLoopTimerCreate(NULL, CFAbsoluteTimeGetCurrent() + 5, 5, 0, 0, retryTarget, NULL);
+        CFRunLoopAddTimer(CFRunLoopGetCurrent(), retryTimer, kCFRunLoopDefaultMode);
+    }
+    cmioWatch();
     cameraArrived(NULL, it);  // the camera may already be connected; this also arms the notification
     CFRunLoopRun();
     return 0;
@@ -2696,11 +2917,13 @@ int main(int argc, char **argv) {
     if (!strcmp(cmd, "watch")) return watch(arg ? arg : "settings", camId);
     int rc = 0;
 #ifdef BRIOCTL_FAKE
-    if (!strcmp(cmd, "--test-watch-target")) {  // test hook: which camera would watch follow
+    if (!strcmp(cmd, "--test-watch-target")) {  // test hook: which camera would watch follow, or why it waits
         char uid[64];
-        if ((rc = watchTarget(camId))) return rc;
+        int found = watchTarget(camId);
+        if (found < 0) return 1;
         cmioUid(uid, sizeof uid);
-        printf("%04x:%04x serial=%s uid=%s\n", target.vid, target.pid, target.serial, uid);
+        if (found) printf("%04x:%04x serial=%s uid=%s\n", target.vid, target.pid, target.serial, uid);
+        else printf("no target\n");
         return 0;
     }
     if (!strcmp(cmd, "--test-cmio")) {  // test hook: the CoreMediaIO device of the chosen camera (reads only)
@@ -2716,6 +2939,18 @@ int main(int argc, char **argv) {
         snprintf(watchPath, sizeof watchPath, "%s", arg);
         if (argc == 4 && !strcmp(argv[3], "video")) videoSettled(NULL, NULL);  // the timer callback of a video start
         else reapply(1, 0, 0);                                                 // the camera connected
+        return 0;
+    }
+    if (!strcmp(cmd, "--test-video-trigger") && arg && argc == 4) {  // test hook: video starts, seen by HID or CMIO
+        // argv[3]: t = a video start is seen, w = the run loop runs long enough for the apply, l = longer than the
+        // second a late report is ignored for
+        if ((rc = selectCamera(camId))) return rc;
+        snprintf(watchPath, sizeof watchPath, "%s", arg);
+        for (const char *p = argv[3]; *p; p++) {
+            if (*p == 't') videoStartSeen();
+            else if (*p == 'w') CFRunLoopRunInMode(kCFRunLoopDefaultMode, 2 * settleSeconds() + 0.3, false);
+            else if (*p == 'l') CFRunLoopRunInMode(kCFRunLoopDefaultMode, settleSeconds() + 1.3, false);
+        }
         return 0;
     }
 #endif

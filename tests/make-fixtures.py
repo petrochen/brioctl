@@ -56,18 +56,23 @@ def strip_extension_units(desc):
     return out[:2] + bytes([len(out) & 0xff, len(out) >> 8]) + out[4:]
 
 
-def declare(desc, ct_bits=(), pu_bits=()):
-    """Set bits in the bmControls of the camera terminal and the processing unit."""
+def declare(desc, ct_bits=(), pu_bits=(), only=False):
+    """Set bits in the bmControls of the camera terminal and the processing unit; with only, those bits and no others
+    (tests/run.sh makes a camera per bit of the UVC tables from this)."""
     out = bytearray(desc)
     in_vc = False
     for off, d in walk(desc):
         if d[1] == DESC_INTERFACE:
             in_vc = d[5] == 0x0e and d[6] == 1
         elif in_vc and d[1] == DESC_CS_INTERFACE and d[2] == VC_INPUT_TERMINAL and d[4] | d[5] << 8 == 0x0201:
+            if only:
+                out[off + 15:off + 15 + d[14]] = bytes(d[14])
             for b in ct_bits:
                 assert b // 8 < d[14], "camera terminal bmControls too short"
                 out[off + 15 + b // 8] |= 1 << b % 8
         elif in_vc and d[1] == DESC_CS_INTERFACE and d[2] == VC_PROCESSING_UNIT:
+            if only:
+                out[off + 8:off + 8 + d[7]] = bytes(d[7])
             for b in pu_bits:
                 assert b // 8 < d[7], "processing unit bmControls too short"
                 out[off + 8 + b // 8] |= 1 << b % 8

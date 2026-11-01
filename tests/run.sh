@@ -69,6 +69,19 @@ edit_reg() {
         { print }' "$BRIOCTL_FAKE" > "$BRIOCTL_FAKE.new" && mv "$BRIOCTL_FAKE.new" "$BRIOCTL_FAKE"
 }
 
+# drop_field UNIT SEL KEY: remove one field (min, max, ...) of a register in this test's snapshot: the camera does not
+# answer that request
+drop_field() {
+    awk -v u="$1" -v s="$2" -v k="$3" '
+        $1 == "reg" && $2 == u && $3 == s {
+            out = $1 " " $2 " " $3
+            for (i = 4; i <= NF; i++) { if ($i == k) { i++; continue } out = out " " $i }
+            print out
+            next
+        }
+        { print }' "$BRIOCTL_FAKE" > "$BRIOCTL_FAKE.new" && mv "$BRIOCTL_FAKE.new" "$BRIOCTL_FAKE"
+}
+
 # count SET_CUR lines in a trace file
 setcurs() { grep -c '^fake SET_CUR' "$1"; }
 
@@ -1081,27 +1094,65 @@ t_watch_target() {
         "1234:5678 serial=GENERIC0002 uid=0x30000012345678" || return 1
     expect "by serial" "$("$BIN" --camera GENERIC0001 --test-watch-target)" \
         "1234:5678 serial=GENERIC0001 uid=0x10000012345678" || return 1
-    "$BIN" --camera 9 --test-watch-target > /dev/null 2>&1; rc=$?
-    expect "no such camera" "$rc" 2 || return 1
-    # no camera known to brioctl: wait for the MX Brio, as 1.0 did, and say so; a FaceTime camera must not be taken
+    # a camera that is not there: watch says so and waits, it does not fail (launchd would start it again at once)
+    out=$("$BIN" --camera 9 --test-watch-target 2>&1); rc=$?
+    expect "no such camera status" "$rc" 0 || return 1
+    has "no such camera message" "$out" "camera 9 is not connected, waiting for it" || return 1
+    has "no such camera, no target" "$out" "no target" || return 1
+    out=$("$BIN" --camera NOSUCHSERIAL --test-watch-target 2>&1)
+    has "no such serial" "$out" "camera NOSUCHSERIAL is not connected, waiting for it" || return 1
+    # no camera known to brioctl: wait for one, say so; a FaceTime camera must not be taken
     BRIOCTL_FAKE=$PWD/generic.snap
     out=$("$BIN" --test-watch-target 2>&1); rc=$?
     expect "status" "$rc" 0 || return 1
-    has "waits for the MX Brio" "$out" "waiting for the MX Brio" || return 1
-    has "and follows it" "$out" "046d:0944 serial= uid=0x0046d0944" || return 1
+    has "waits for a known camera" "$out" "no camera known to brioctl is connected, waiting for one" || return 1
+    has "and follows nothing" "$out" "no target" || return 1
+    hasnt "no uid" "$out" uid= || return 1
     expect "with --camera it follows the camera" "$("$BIN" --camera 1 --test-watch-target)" \
         "1234:5678 serial=000000000000 uid=0x10000012345678" || return 1
     BRIOCTL_FAKE=$PWD/g1.snap:$PWD/g2.snap
-    has "two unknown cameras" "$("$BIN" --test-watch-target 2>&1)" "046d:0944 serial= " || return 1
-    # nothing connected: the MX Brio, without a remark
+    out=$("$BIN" --test-watch-target 2>&1)
+    has "two unknown cameras" "$out" "no camera known to brioctl is connected" || return 1
+    has "two unknown cameras, no target" "$out" "no target" || return 1
+    # nothing connected: the same, and --camera is not an error either
     BRIOCTL_FAKE=:
-    expect "no camera" "$("$BIN" --test-watch-target)" "046d:0944 serial= uid=0x0046d0944" || return 1
-    "$BIN" --camera 1 --test-watch-target > /dev/null 2>&1; rc=$?
-    expect "no camera, --camera" "$rc" 1 || return 1
-    # two known cameras: a choice is needed
+    out=$("$BIN" --test-watch-target 2>&1); rc=$?
+    expect "no camera status" "$rc" 0 || return 1
+    has "no camera message" "$out" "no camera known to brioctl is connected, waiting for one" || return 1
+    has "no camera, no target" "$out" "no target" || return 1
+    out=$("$BIN" --camera 1 --test-watch-target 2>&1); rc=$?
+    expect "no camera, --camera status" "$rc" 0 || return 1
+    has "no camera, --camera message" "$out" "camera 1 is not connected, waiting for it" || return 1
+    # the single full camera wins over an experimental one
     BRIOCTL_FAKE=$PWD/camera.snap:$PWD/brio500.snap
-    "$BIN" --test-watch-target > /dev/null 2>&1; rc=$?
-    expect "two known cameras" "$rc" 2
+    expect "full before experimental" "$("$BIN" --test-watch-target)" \
+        "046d:0944 serial=000000000000 uid=0x100000046d0944" || return 1
+    BRIOCTL_FAKE=$PWD/brio500.snap:$PWD/camera.snap
+    expect "full before experimental, any order" "$("$BIN" --test-watch-target)" \
+        "046d:0944 serial=000000000000 uid=0x200000046d0944" || return 1
+    # no full camera: the single experimental one (a generic camera next to it is not considered)
+    BRIOCTL_FAKE=$PWD/g1.snap:$PWD/brio500.snap
+    expect "the experimental one" "$("$BIN" --test-watch-target)" \
+        "046d:0943 serial=000000000000 uid=0x200000046d0943" || return 1
+    # not clear: two full cameras, two experimental ones. Say so and wait, whatever else is connected.
+    sed 's/^serial .*/serial BRIOSERIAL2/' camera.snap > brio2.snap
+    BRIOCTL_FAKE=$PWD/camera.snap:$PWD/brio2.snap:$PWD/brio500.snap
+    out=$("$BIN" --test-watch-target 2>&1); rc=$?
+    expect "two full status" "$rc" 0 || return 1
+    has "two full message" "$out" "several cameras with full support, waiting (choose one with --camera ID)" || return 1
+    has "two full, no target" "$out" "no target" || return 1
+    expect "--camera settles it" "$("$BIN" --camera BRIOSERIAL2 --test-watch-target)" \
+        "046d:0944 serial=BRIOSERIAL2 uid=0x200000046d0944" || return 1
+    cp brio500.snap b5b.snap
+    BRIOCTL_FAKE=$PWD/brio500.snap:$PWD/b5b.snap
+    out=$("$BIN" --test-watch-target 2>&1)
+    has "two experimental message" "$out" "several cameras with experimental support, waiting" || return 1
+    has "two experimental, no target" "$out" "no target" || return 1
+    # the same serial twice does not name a camera either
+    BRIOCTL_FAKE=$PWD/camera.snap:$PWD/camera.snap
+    out=$("$BIN" --camera 000000000000 --test-watch-target 2>&1); rc=$?
+    expect "same serial status" "$rc" 0 || return 1
+    has "same serial message" "$out" "serial 000000000000 matches several cameras, waiting"
 }
 
 t_watch_applies_to_the_chosen_camera() {
@@ -1564,6 +1615,406 @@ assert c.execute("SELECT _date_created FROM data").fetchone()[0] == "2000-01-01 
 EOF
 }
 
+# --- review fixes: privacy, watch and other models, strict re-identification, numbers, decimals, bmControls ---------------
+
+t_privacy_is_not_a_preference() {
+    export BRIOCTL_FAKE=$PWD/extra.snap
+    edit_reg "$CT" 17 info 03  # this camera lets the shutter be set
+    # by hand it works
+    expect "privacy on" "$("$BIN" privacy on)" "privacy on" || return 1
+    expect "get privacy" "$("$BIN" get privacy)" on || return 1
+    # save never writes it, whatever its state, and still saves the rest
+    "$BIN" save "$PWD/s" > /dev/null || return 1
+    noline "save leaves privacy out" "$(cat s)" privacy || return 1
+    has "the rest is saved" "$(cat s)" "brightness " || return 1
+    # defaults does not reset it
+    BRIOCTL_FAKE_TRACE=1 "$BIN" defaults > /dev/null 2> trace
+    [ "$(setcurs trace)" -gt 0 ] || { echo "# defaults wrote nothing at all"; return 1; }
+    hasnt "defaults does not touch privacy" "$(grep SET_CUR trace)" "unit $CT sel 17" || return 1
+    expect "privacy is still on" "$("$BIN" get privacy)" on || return 1
+    # watch applies a file without it, whether the camera connected or video started, and says so
+    printf 'privacy off\nzoom 130\n' > settings
+    BRIOCTL_FAKE_TRACE=1 "$BIN" --test-reapply "$PWD/settings" > out 2> trace || return 1
+    expect "connect writes zoom only" "$(grep -o 'unit [0-9]* sel [0-9]*' trace | tr '\n' ' ')" "unit $CT sel 11 " || return 1
+    has "and says what it left" "$(cat out)" "not applied by watch, set by hand only: privacy" || return 1
+    printf 'privacy off\nzoom 140\n' > settings
+    BRIOCTL_FAKE_TRACE=1 "$BIN" --test-reapply "$PWD/settings" video > out 2> trace || return 1
+    expect "video start writes zoom only" "$(grep -o 'unit [0-9]* sel [0-9]*' trace | tr '\n' ' ')" "unit $CT sel 11 " || return 1
+    expect "privacy is still on after watch" "$("$BIN" get privacy)" on || return 1
+    # a file somebody wrote with privacy in it is applied by apply, which is an explicit act
+    "$BIN" apply "$PWD/settings" > /dev/null || return 1
+    expect "apply sets it" "$("$BIN" get privacy)" off || return 1
+    # a camera that does not allow writing it keeps saying so
+    edit_reg "$CT" 17 info 01
+    out=$("$BIN" privacy on 2>&1); rc=$?
+    expect "read-only privacy status" "$rc" 1
+}
+
+t_watch_wont_apply_to_another_model() {
+    printf '# camera 046d:0944 ABC\nzoom 140\nbrightness 100\n' > other
+    export BRIOCTL_FAKE=$PWD/generic.snap
+    BRIOCTL_FAKE_TRACE=1 "$BIN" --test-reapply "$PWD/other" > out 2> trace; rc=$?
+    expect "status" "$rc" 0 || return 1
+    has "the reason" "$(cat out)" \
+        "settings were saved from 046d:0944; not applying them to 1234:5678 (save them from this camera)" || return 1
+    expect "said once" "$(grep -c 'not applying them' out)" 1 || return 1
+    hasnt "no apply line" "$(cat out)" "applied" || return 1
+    expect "nothing written" "$(setcurs trace)" 0 || return 1
+    expect "zoom unchanged" "$("$BIN" get zoom)" 115 || return 1
+    # video start: nothing is applied, and the connect already said why
+    "$BIN" --test-reapply "$PWD/other" video > out 2>&1 || return 1
+    hasnt "not said again" "$(cat out)" "not applying" || return 1
+    expect "still unchanged" "$("$BIN" get zoom)" 115 || return 1
+    # by hand it stays a warning, and what fits is applied
+    out=$("$BIN" apply "$PWD/other" 2>&1); rc=$?
+    expect "apply status" "$rc" 0 || return 1
+    has "apply warns" "$out" "warning: these settings were saved from camera 046d:0944, this is 1234:5678" || return 1
+    expect "apply applies" "$("$BIN" get zoom)" 140 || return 1
+    # the same ids with another serial number, no header, and a file for the MX Brio on an MX Brio are applied
+    printf '# camera 1234:5678 SOMEBODYELSE\nzoom 150\n' > same
+    "$BIN" --test-reapply "$PWD/same" > out 2>&1 || return 1
+    has "same ids" "$(cat out)" "applied (1 changed)" || return 1
+    printf 'zoom 160\n' > plain
+    "$BIN" --test-reapply "$PWD/plain" > out 2>&1 || return 1
+    has "no header" "$(cat out)" "applied (1 changed)" || return 1
+    export BRIOCTL_FAKE=$PWD/camera.snap
+    printf '# camera 046d:0944 ABC\nzoom 170\n' > mx
+    "$BIN" --test-reapply "$PWD/mx" > out 2>&1 || return 1
+    has "MX Brio file on an MX Brio" "$(cat out)" "applied (1 changed)" || return 1
+    # and the other way round: a file from a generic camera on the MX Brio
+    printf '# camera 1234:5678\nzoom 180\n' > gen
+    "$BIN" --test-reapply "$PWD/gen" > out 2>&1 || return 1
+    has "generic file on an MX Brio" "$(cat out)" \
+        "settings were saved from 1234:5678; not applying them to 046d:0944" || return 1
+    expect "zoom" "$("$BIN" get zoom)" 170
+}
+
+t_one_apply_per_video_start() {
+    printf 'zoom 130\n' > settings
+    export BRIOCTL_FAKE_SETTLE=0.05
+    # SEQ: t = a video start is seen (by HID or by CoreMediaIO), w = time passes (the apply), l = a long time passes
+    for seq in tw ttw tttw twtw twttw; do
+        out=$("$BIN" --test-video-trigger "$PWD/settings" $seq 2>&1) || return 1
+        expect "applies for $seq" "$(printf '%s\n' "$out" | grep -c 'video started')" 1 || return 1
+    done
+    out=$("$BIN" --test-video-trigger "$PWD/settings" w 2>&1) || return 1
+    expect "nothing without a start" "$out" "" || return 1
+    # the second source is only ignored for a moment after the apply: a start later on is a new one
+    out=$("$BIN" --test-video-trigger "$PWD/settings" twltw 2>&1) || return 1
+    expect "two starts, two applies" "$(printf '%s\n' "$out" | grep -c 'video started')" 2
+}
+
+t_camera_found_again_by_serial_or_place() {
+    printf 'zoom 150\n' > settings
+    # a serial number finds the camera on another port
+    sed 's/^serial .*/serial SERIAL0001/' camera.snap > a.snap
+    cp a.snap moved.snap
+    printf 'location 0x500000\n' >> moved.snap
+    BRIOCTL_FAKE=$PWD/a.snap BRIOCTL_FAKE_AFTER=$PWD/moved.snap "$BIN" --test-reapply "$PWD/settings" > out 2>&1
+    has "found on the other port" "$(cat out)" "applied (1 changed)" || return 1
+    has "and written there" "$(grep '^reg 1 11 ' moved.snap)" "cur 9600" || return 1
+    has "its location is kept" "$(cat moved.snap)" "location 0x500000" || return 1
+    # without one the place is all there is: another place is no camera
+    grep -v '^serial ' camera.snap > b.snap
+    cp b.snap away.snap
+    printf 'location 0x500000\n' >> away.snap
+    BRIOCTL_FAKE=$PWD/b.snap BRIOCTL_FAKE_AFTER=$PWD/away.snap "$BIN" --test-reapply "$PWD/settings" > out 2>&1
+    has "not connected" "$(cat out)" "MX Brio is not connected" || return 1
+    has "nothing applied" "$(cat out)" "could not apply all settings (0 changed)" || return 1
+    has "nothing written" "$(grep '^reg 1 11 ' away.snap)" "cur 7300" || return 1
+    cp b.snap same.snap
+    BRIOCTL_FAKE=$PWD/b.snap BRIOCTL_FAKE_AFTER=$PWD/same.snap "$BIN" --test-reapply "$PWD/settings" > out 2>&1
+    has "same place, same camera" "$(cat out)" "applied (1 changed)" || return 1
+    # two cameras of one make without serial numbers: not "the first one"
+    cp b.snap c.snap
+    printf 'location 0x200000\n' >> c.snap
+    cp b.snap d.snap
+    printf 'location 0x300000\n' >> d.snap
+    cp b.snap e.snap
+    printf 'location 0x400000\n' >> e.snap
+    BRIOCTL_FAKE=$PWD/b.snap:$PWD/c.snap BRIOCTL_FAKE_AFTER=$PWD/d.snap:$PWD/e.snap \
+        "$BIN" --camera 2 --test-reapply "$PWD/settings" > out 2>&1
+    has "neither is the second camera" "$(cat out)" "MX Brio is not connected" || return 1
+    has "d untouched" "$(grep '^reg 1 11 ' d.snap)" "cur 7300" || return 1
+    has "e untouched" "$(grep '^reg 1 11 ' e.snap)" "cur 7300" || return 1
+    # the second one is found where it was
+    BRIOCTL_FAKE=$PWD/b.snap:$PWD/c.snap BRIOCTL_FAKE_AFTER=$PWD/d.snap:$PWD/c.snap \
+        "$BIN" --camera 2 --test-reapply "$PWD/settings" > out 2>&1
+    has "the second one where it was" "$(cat out)" "applied (1 changed)" || return 1
+    has "it got the write" "$(grep '^reg 1 11 ' c.snap)" "cur 9600" || return 1
+    has "the first did not" "$(grep '^reg 1 11 ' b.snap)" "cur 7300"
+}
+
+t_numbers_need_a_known_range() {
+    drop_field "$CT" 11 max  # zoom: GET_MAX does not answer
+    BRIOCTL_FAKE_TRACE=1 "$BIN" zoom 130 > out 2> trace; rc=$?
+    expect "no max status" "$rc" 1 || return 1
+    has "no max message" "$(cat trace)" "zoom: range unknown, not writing" || return 1
+    expect "no max, no write" "$(setcurs trace)" 0 || return 1
+    cp "$FIXTURE" "$BRIOCTL_FAKE"
+    drop_field "$CT" 11 min
+    out=$("$BIN" zoom 130 2>&1); rc=$?
+    expect "no min status" "$rc" 1 || return 1
+    has "no min message" "$out" "range unknown, not writing" || return 1
+    expect "zoom unchanged" "$("$BIN" get zoom)" 115 || return 1
+    # a Logitech number, and pan and tilt (one control for two fields)
+    cp "$FIXTURE" "$BRIOCTL_FAKE"
+    drop_field "$VIDEOPIPE" 21 min
+    drop_field "$CT" 13 max
+    for cmd in "warmth 60" "pan 5" "tilt 5"; do
+        out=$(BRIOCTL_FAKE_TRACE=1 "$BIN" $cmd 2>&1); rc=$?
+        expect "$cmd status" "$rc" 1 || return 1
+        has "$cmd message" "$out" "range unknown, not writing" || return 1
+        hasnt "$cmd write" "$out" "fake SET_CUR" || return 1
+    done
+    # a named value does not need a range
+    drop_field "$PU" 1 min
+    drop_field "$PU" 1 max
+    expect "hdr off without a range" "$("$BIN" hdr off)" "hdr off" || return 1
+    # apply refuses it too, and save does not write what apply would refuse
+    drop_field "$CT" 11 max
+    printf 'zoom 130\nbrightness 100\n' > settings
+    out=$("$BIN" apply "$PWD/settings" 2>&1); rc=$?
+    expect "apply status" "$rc" 1 || return 1
+    has "apply says why" "$out" "zoom: range unknown, not writing" || return 1
+    expect "the rest is applied" "$("$BIN" get brightness)" 100 || return 1
+    "$BIN" save "$PWD/s" > /dev/null || return 1
+    noline "zoom is not saved" "$(cat s)" zoom || return 1
+    noline "warmth is not saved" "$(cat s)" warmth || return 1
+    noline "pan is not saved" "$(cat s)" pan || return 1
+    has "named values still are" "$(cat s)" "hdr off" || return 1
+    has "and numbers with a range" "$(cat s)" "brightness 100" || return 1
+    "$BIN" defaults > /dev/null 2>&1
+    expect "defaults leaves them alone too" "$("$BIN" get warmth)" 62
+}
+
+t_value_must_fit_the_control() {
+    # ranges as wide as the field: 1 byte unsigned (warmth), 2 bytes unsigned (contrast), 2 bytes signed (brightness)
+    edit_reg "$VIDEOPIPE" 21 max ff
+    edit_reg "$PU" 3 max ffff
+    edit_reg "$PU" 2 min 0080
+    edit_reg "$PU" 2 max ff7f
+    for cmd in "warmth 256" "warmth -1" "contrast 65536" "contrast -1" "brightness 32768" "brightness -32769"; do
+        out=$(BRIOCTL_FAKE_TRACE=1 "$BIN" $cmd 2>&1); rc=$?
+        expect "$cmd status" "$rc" 1 || return 1
+        has "$cmd message" "$out" "out of range" || return 1
+        hasnt "$cmd write" "$out" "fake SET_CUR" || return 1
+    done
+    BRIOCTL_FAKE_TRACE=1 "$BIN" warmth 255 contrast 65535 brightness -32768 > out 2> trace; rc=$?
+    expect "the largest values status" "$rc" 0 || return 1
+    has "warmth" "$(cat trace)" "SET_CUR unit $VIDEOPIPE sel 21 ff" || return 1
+    has "contrast" "$(cat trace)" "SET_CUR unit $PU sel 3 ffff" || return 1
+    has "brightness" "$(cat trace)" "SET_CUR unit $PU sel 2 0080" || return 1
+    expect "brightness back" "$("$BIN" get brightness)" -32768 || return 1
+    "$BIN" brightness 32767 > /dev/null || return 1
+    expect "brightness top" "$("$BIN" get brightness)" 32767
+}
+
+t_numbers_that_overflow_are_refused() {
+    for cmd in "pan 9999999999999999999999" "pan -9999999999999999999999" "pan 3000000000000000" \
+        "pan 99999999999999999999" "tilt 9999999999999999999999" "zoom 9999999999999999999999" \
+        "zoom 9223372036854775808" "zoom -9223372036854775809" "zoom 9223372036854775807" \
+        "pan 9223372036854775807"; do
+        out=$(BRIOCTL_FAKE_TRACE=1 "$BIN" $cmd 2>&1); rc=$?
+        expect "$cmd status" "$rc" 1 || return 1
+        hasnt "$cmd write" "$out" "fake SET_CUR" || return 1
+    done
+    has "overflow is a bad value" "$("$BIN" pan 9999999999999999999999 2>&1)" \
+        "pan: bad value 9999999999999999999999" || return 1
+    has "zoom overflow is a bad value too" "$("$BIN" zoom 9999999999999999999999 2>&1)" \
+        "zoom: bad value 9999999999999999999999" || return 1
+    has "a long that fits is out of range" "$("$BIN" zoom 9223372036854775807 2>&1)" "out of range (100-400)" || return 1
+    expect "pan unchanged" "$("$BIN" get pan)" 0 || return 1
+    expect "zoom unchanged" "$("$BIN" get zoom)" 115
+}
+
+t_decimal_degrees() {
+    out=$(BRIOCTL_FAKE_TRACE=1 "$BIN" pan 1.99 2> trace); rc=$?
+    expect "pan 1.99 status" "$rc" 0 || return 1
+    expect "pan 1.99 output" "$out" "pan 1.99" || return 1
+    has "7164 units, tilt kept" "$(cat trace)" "fake SET_CUR unit $CT sel 13 fc1b000000000000" || return 1
+    expect "get pan" "$("$BIN" get pan)" 1.99 || return 1
+    # what save writes, apply reads back
+    "$BIN" tilt -3.5 > /dev/null || return 1
+    "$BIN" save "$PWD/s" > /dev/null || return 1
+    has "saved pan" "$(cat s)" "pan 1.99" || return 1
+    has "saved tilt" "$(cat s)" "tilt -3.50" || return 1
+    "$BIN" pan 5 tilt 0 > /dev/null || return 1
+    "$BIN" apply "$PWD/s" > /dev/null || return 1
+    expect "pan after apply" "$("$BIN" get pan)" 1.99 || return 1
+    expect "tilt after apply" "$("$BIN" get tilt)" -3.50 || return 1
+    # rounded to the nearest register unit (1/3600 degree)
+    expect "below half a unit" "$("$BIN" pan 0.0001)" "pan 0" || return 1
+    expect "above half a unit" "$("$BIN" pan 0.0002)" "pan 0.0003" || return 1
+    expect "negative" "$("$BIN" pan -1.99)" "pan -1.99" || return 1
+    expect "no leading digit" "$("$BIN" pan .5)" "pan 0.50" || return 1
+    expect "whole degrees as before" "$("$BIN" pan 7)" "pan 7" || return 1
+    # every register value reads back as itself: 7165 units is 1.99028 degrees
+    edit_reg "$CT" 13 cur fd1b000000000000
+    expect "a unit that needs four decimals" "$("$BIN" get pan)" 1.9903 || return 1
+    "$BIN" save "$PWD/t" > /dev/null || return 1
+    has "saved with four decimals" "$(cat t)" "pan 1.9903" || return 1
+    "$BIN" pan 0 > /dev/null || return 1
+    "$BIN" apply "$PWD/t" > /dev/null || return 1
+    "$BIN" snapshot > out.snap || return 1
+    has "the same register value" "$(grep "^reg $CT 13 " out.snap)" "cur fd1b000000000000" || return 1
+    # the range is the camera's: -20 to 20 degrees
+    expect "the top" "$("$BIN" pan 20)" "pan 20" || return 1
+    out=$("$BIN" pan 20.0002 2>&1); rc=$?
+    expect "just above the top" "$rc" 1 || return 1
+    has "range in the message" "$out" "out of range (-20..20)" || return 1
+    # not numbers, and not decimals for a control that has none
+    for bad in abc 1.2.3 nan inf -inf 1e2 0x10 . - + -. +-1 --1 1,5 "1 2" ""; do
+        "$BIN" pan "$bad" > /dev/null 2>&1; rc=$?
+        expect "pan '$bad' status" "$rc" 1 || return 1
+    done
+    out=$("$BIN" zoom 120.5 2>&1); rc=$?
+    expect "zoom 120.5 status" "$rc" 1 || return 1
+    has "zoom 120.5 message" "$out" "zoom: bad value 120.5" || return 1
+    # in --json too, as a number
+    python3 -I -c pass >/dev/null 2>&1 || return 0
+    "$BIN" pan 1.99 > /dev/null || return 1
+    "$BIN" --json | python3 -I -c 'import json, sys; s = json.load(sys.stdin)["settings"]; assert s["pan"]["value"] == 1.99, s["pan"]'
+}
+
+t_hdr_and_backlight_both_ways() {
+    # the MX Brio has hdr (on or off): 1 and 0 work under both names
+    expect "backlight 0" "$("$BIN" backlight 0)" "hdr off" || return 1
+    expect "backlight 1" "$("$BIN" backlight 1)" "hdr on" || return 1
+    expect "hdr 0" "$("$BIN" hdr 0)" "hdr off" || return 1
+    expect "hdr 1" "$("$BIN" hdr 1)" "hdr on" || return 1
+    expect "backlight off" "$("$BIN" backlight off)" "hdr off" || return 1
+    expect "backlight on" "$("$BIN" backlight on)" "hdr on" || return 1
+    for v in 2 -1 yes; do
+        out=$("$BIN" backlight $v 2>&1); rc=$?
+        expect "backlight $v status" "$rc" 1 || return 1
+        has "backlight $v message" "$out" "bad value $v" || return 1
+    done
+    # a camera with a number: on and off are 1 and 0 under both names
+    export BRIOCTL_FAKE=$PWD/generic.snap
+    expect "hdr off" "$("$BIN" hdr off)" "backlight 0" || return 1
+    expect "get" "$("$BIN" get backlight)" 0 || return 1
+    expect "hdr on" "$("$BIN" hdr on)" "backlight 1" || return 1
+    expect "backlight off" "$("$BIN" backlight off)" "backlight 0" || return 1
+    expect "backlight on" "$("$BIN" backlight on)" "backlight 1" || return 1
+    # a settings file from the MX Brio, with hdr in it, applies to the other camera
+    "$BIN" backlight 0 > /dev/null || return 1
+    printf '# camera 046d:0944 XYZ\nhdr on\n' > mx
+    "$BIN" apply "$PWD/mx" > /dev/null 2>&1; rc=$?
+    expect "apply status" "$rc" 0 || return 1
+    expect "hdr on applied" "$("$BIN" get backlight)" 1 || return 1
+    printf 'hdr off\n' > mx
+    "$BIN" --test-reapply "$PWD/mx" > out 2>&1 || return 1
+    expect "and by watch" "$("$BIN" get backlight)" 0 || return 1
+    # the camera's range still counts
+    edit_reg "$PU" 1 max 0000
+    out=$("$BIN" hdr on 2>&1); rc=$?
+    expect "above the range" "$rc" 1 || return 1
+    has "above the range message" "$out" "out of range (0-0)" || return 1
+    expect "inside the range" "$("$BIN" hdr off)" "backlight 0" || return 1
+    "$BIN" backlight 2 > /dev/null 2>&1; rc=$?
+    expect "a number outside" "$rc" 1
+}
+
+# bmcontrols_fixtures SNAPSHOT: a camera for every bit of the camera terminal and of the processing unit (UVC 1.5
+# tables 3-6 and 3-8), declaring that bit and no other, as bit-ct-N.snap and bit-pu-N.snap; bits.txt has a line for
+# each: the file, then the controls that bit gives (none where brioctl has no control). all.snap declares every bit.
+bmcontrols_fixtures() {
+    python3 -I - "$HERE/make-fixtures.py" "$1" <<'PY'
+import importlib.util, sys
+sys.dont_write_bytecode = True  # no __pycache__ next to the repository's make-fixtures.py
+spec = importlib.util.spec_from_file_location("fixtures", sys.argv[1])
+mf = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mf)
+lines = open(sys.argv[2]).read().splitlines()
+desc = bytes.fromhex([l for l in lines if l.startswith("descriptor ")][0].split()[1])
+CT = {1: "ae", 2: "priority", 3: "exposure", 5: "focus", 7: "iris", 9: "zoom", 11: "pan tilt", 13: "roll", 17: "af",
+      18: "privacy"}
+PU = {0: "brightness", 1: "contrast", 2: "hue", 3: "saturation", 4: "sharpness", 5: "gamma", 6: "wb", 8: "backlight",
+      9: "gain", 10: "flicker", 11: "hueauto", 12: "awb"}
+
+def write(name, d):
+    out = ["descriptor " + d.hex() if l.startswith("descriptor ") else l for l in lines]
+    open(name, "w").write("\n".join(out) + "\n")
+
+bits = []
+for unit, table, size in (("ct", CT, 22), ("pu", PU, 16)):  # the MX Brio's descriptor has 3 and 2 bytes of them
+    for bit in range(size):
+        ct, pu = ((bit,), ()) if unit == "ct" else ((), (bit,))
+        name = "bit-%s-%d.snap" % (unit, bit)
+        write(name, mf.declare(desc, ct_bits=ct, pu_bits=pu, only=True))
+        bits.append("%s %s" % (name, " ".join(sorted(table.get(bit, "").split()))))
+open("bits.txt", "w").write("\n".join(bits) + "\n")
+write("all.snap", mf.declare(desc, ct_bits=range(22), pu_bits=range(16), only=True))
+PY
+}
+
+t_bmcontrols_bit_by_bit() {
+    python3 -I -c pass >/dev/null 2>&1 || { echo "# python3 not available"; return 77; }
+    bmcontrols_fixtures extra.snap || return 1
+    n=0
+    while read -r file want; do
+        got=$(BRIOCTL_FAKE=$PWD/$file "$BIN" 2>&1 | sed -n 's/^  \([a-z]*\) .*/\1/p' | sort | tr '\n' ' ' | sed 's/ $//')
+        expect "$file declares" "$got" "$want" || return 1
+        n=$((n + 1))
+    done < bits.txt
+    expect "cameras tried" "$n" 38 || return 1
+    # every bit at once: 23 controls (pan and tilt share a bit; a camera that is not an MX Brio calls the HDR switch backlight)
+    got=$(BRIOCTL_FAKE=$PWD/all.snap "$BIN" 2>&1 | sed -n 's/^  \([a-z]*\) .*/\1/p' | wc -l | tr -d ' ')
+    expect "all bits" "$got" 23
+}
+
+t_camera_index_follows_location() {
+    three_cameras
+    printf 'location 0x300000\n' >> g1.snap
+    printf 'location 0x100000\n' >> brio.snap
+    printf 'location 0x200000\n' >> g2.snap
+    # the order in the environment does not matter: the cameras are numbered by USB location
+    for order in "g1 brio g2" "g2 g1 brio" "brio g2 g1"; do
+        BRIOCTL_FAKE=
+        for f in $order; do BRIOCTL_FAKE=$BRIOCTL_FAKE:$PWD/$f.snap; done
+        BRIOCTL_FAKE=${BRIOCTL_FAKE#:}
+        out=$("$BIN" list) || return 1
+        matches "1 is the MX Brio ($order)" "$out" '^1 +046d:0944 +MX Brio .* BRIOSERIAL1 +0x100000$' || return 1
+        matches "2 is the second ($order)" "$out" '^2 +1234:5678 .* GENERIC0002 +0x200000$' || return 1
+        matches "3 is the third ($order)" "$out" '^3 +1234:5678 .* GENERIC0001 +0x300000$' || return 1
+        got=$("$BIN" --camera 3 --json | python3 -I -c 'import json, sys; d = json.load(sys.stdin)["device"]; print(d["serial"], d["index"], d["location"])')
+        expect "--camera 3 ($order)" "$got" "GENERIC0001 3 0x300000" || return 1
+    done
+    "$BIN" --camera 3 brightness 100 > /dev/null || return 1
+    has "index 3 is the camera at 0x300000" "$(grep '^reg 3 2 ' g1.snap)" "cur 6400" || return 1
+    has "and not the others" "$(grep '^reg 3 2 ' g2.snap)" "cur 8000" || return 1
+    expect "by location" "$(which_camera --camera 0x200000)" "device 1234 5678" || return 1
+    expect "by location, MX Brio" "$("$BIN" --camera 0x100000 get zoom)" 115 || return 1
+    expect "watch follows the MX Brio by its place" "$("$BIN" --test-watch-target)" \
+        "046d:0944 serial=BRIOSERIAL1 uid=0x100000046d0944"
+}
+
+t_json_serial_is_the_usb_serial() {
+    python3 -I -c pass >/dev/null 2>&1 || { echo "# python3 not available"; return 77; }
+    # the camera's own register says INFOSERIAL01, USB says USBSERIAL001: list and --camera use the USB one
+    sed 's/^serial .*/serial USBSERIAL001/' camera.snap > usb.snap
+    BRIOCTL_FAKE=$PWD/usb.snap
+    edit_reg "$INFO" 7 cur 494e464f53455249414c3031
+    has "the register" "$("$BIN" 2>&1)" "serial INFOSERIAL01" || return 1
+    "$BIN" --json > out.json || return 1
+    "$BIN" list --json > list.json || return 1
+    python3 -I - out.json list.json <<'PY' || return 1
+import json, sys
+dev = json.load(open(sys.argv[1]))["device"]
+listed = json.load(open(sys.argv[2]))["cameras"][0]
+assert dev["serial"] == "USBSERIAL001" == listed["serial"], (dev["serial"], listed["serial"])
+PY
+    expect "--camera takes it" "$("$BIN" --camera USBSERIAL001 get zoom)" 115 || return 1
+    # without a USB serial the register is the fallback; without both there is none
+    grep -v '^serial ' usb.snap > nousb.snap
+    BRIOCTL_FAKE=$PWD/nousb.snap
+    "$BIN" --json | python3 -I -c 'import json, sys; assert json.load(sys.stdin)["device"]["serial"] == "INFOSERIAL01"' || return 1
+    grep -v '^serial ' generic.snap > nogen.snap
+    BRIOCTL_FAKE=$PWD/nogen.snap
+    "$BIN" --json | python3 -I -c 'import json, sys; assert json.load(sys.stdin)["device"]["serial"] is None'
+}
+
 # --- run -----------------------------------------------------------------------------------------------------------
 
 N=0
@@ -1650,9 +2101,21 @@ run "--json: group, writable, kind, min, max, step, choices and help for the GUI
 run "--json of a generic, an experimental and another camera" t_json_other_cameras
 run "errors with --json are text on stderr and a non-zero exit" t_json_errors_are_text
 run "profiles --json lists presets, saved files and the directory" t_profiles_json
-run "watch follows the chosen camera, or waits for the MX Brio" t_watch_target
+run "watch follows the one full camera, else the one experimental one, else waits (never exits)" t_watch_target
 run "watch applies to the chosen camera, found again by its ids and serial" t_watch_applies_to_the_chosen_camera
 run "the CoreMediaIO lookup finds nothing for an unknown camera" t_cmio_hook
+run "privacy is not saved, not reset by defaults, not applied by watch; by hand it works" t_privacy_is_not_a_preference
+run "watch does not apply a file saved from another model; apply only warns" t_watch_wont_apply_to_another_model
+run "one video start gives one apply, whichever of HID and CoreMediaIO comes first" t_one_apply_per_video_start
+run "a camera is found again by its serial number, or by its place if it has none" t_camera_found_again_by_serial_or_place
+run "a number is written only with a range from the camera" t_numbers_need_a_known_range
+run "a value outside the control's field is refused, signed or unsigned" t_value_must_fit_the_control
+run "numbers that overflow are refused" t_numbers_that_overflow_are_refused
+run "pan and tilt take decimals; save and apply round-trip every register value" t_decimal_degrees
+run "hdr and backlight take on/off and 1/0 on every camera, within its range" t_hdr_and_backlight_both_ways
+run "every bit of bmControls gives exactly its control" t_bmcontrols_bit_by_bit
+run "cameras are numbered by USB location, not by the order they are given" t_camera_index_follows_location
+run "--json device.serial is the USB serial that list and --camera use" t_json_serial_is_the_usb_serial
 run "import optionsplus prints the twenty settings and what it leaves out, with no camera" t_import_sample
 run "import optionsplus reads the default settings.db of Logi Options+" t_import_default_path
 run "import optionsplus --save writes a settings file, refuses preset names, writes nothing on failure" t_import_save
