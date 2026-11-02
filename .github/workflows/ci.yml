@@ -50,6 +50,17 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v7
+      # First, so that a tag without release notes fails before anything is built.
+      - name: Release notes from CHANGELOG.md
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          # The CHANGELOG.md section of this version, without its heading; "## 1.1.0 — DATE" matches 1.1.0, not 1.1.
+          awk -v v="$version" '/^## /{ p = (index($0, "## " v " ") == 1); next } p' CHANGELOG.md > "$RUNNER_TEMP/notes.md"
+          if ! grep -q '[^[:space:]]' "$RUNNER_TEMP/notes.md"; then
+            echo "::error file=CHANGELOG.md::CHANGELOG.md has no '## $version — DATE' section, or it is empty. Add it, then move the tag $GITHUB_REF_NAME to the commit that has it."
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/notes.md"
       - name: Build the release tarball
         run: |
           version="${GITHUB_REF_NAME#v}"
@@ -66,17 +77,23 @@ jobs:
           codesign --verify --deep --strict "$check/brioctl.app"
           "$check/brioctl.app/Contents/Resources/brioctl" --version | grep -qx "brioctl $version"
           ls -l "$zip"
-      - name: Create the GitHub release
+      # Safe to re-run: if the release for the tag exists, its assets are replaced and its notes updated.
+      - name: Create or update the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           version="${GITHUB_REF_NAME#v}"
-          # Release notes: the CHANGELOG.md section of this version.
-          awk -v v="$version" '/^## /{ p = (index($0, "## " v " ") == 1); next } p' CHANGELOG.md > notes.md
-          if [ -s notes.md ]; then
-            gh release create "$GITHUB_REF_NAME" "brioctl-$version-macos-universal.tar.gz" \
-              "app/build/brioctl-app-$version.zip" --title "brioctl $version" --notes-file notes.md
+          tarball="brioctl-$version-macos-universal.tar.gz"
+          zip="app/build/brioctl-app-$version.zip"
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2> "$RUNNER_TEMP/view.err"; then
+            echo "Release $GITHUB_REF_NAME exists: replacing its assets and notes"
+            gh release upload "$GITHUB_REF_NAME" "$tarball" "$zip" --clobber
+            gh release edit "$GITHUB_REF_NAME" --title "brioctl $version" --notes-file "$RUNNER_TEMP/notes.md"
+          elif grep -qi "not found" "$RUNNER_TEMP/view.err"; then
+            gh release create "$GITHUB_REF_NAME" "$tarball" "$zip" --title "brioctl $version" \
+              --notes-file "$RUNNER_TEMP/notes.md"
           else
-            gh release create "$GITHUB_REF_NAME" "brioctl-$version-macos-universal.tar.gz" \
-              "app/build/brioctl-app-$version.zip" --title "brioctl $version" --generate-notes
+            cat "$RUNNER_TEMP/view.err" >&2
+            echo "::error::cannot tell whether release $GITHUB_REF_NAME exists"
+            exit 1
           fi
