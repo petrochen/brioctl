@@ -2832,6 +2832,19 @@ done:
     return rc;
 }
 
+// A line of the imported text that tells something about the import instead of setting something.
+static int isNotice(const char *line) { return !strncmp(line, "# skipped:", 10) || !strncmp(line, "# check:", 8); }
+
+// Writes the lines of text that are notices (notices = 1) or the others (notices = 0), in their order.
+static void printLines(FILE *to, const char *text, int notices) {
+    while (*text) {
+        size_t len = strcspn(text, "\n");
+        len += text[len] == '\n';
+        if (isNotice(text) == notices) fwrite(text, 1, len, to);
+        text += len;
+    }
+}
+
 // brioctl import optionsplus [DB] [--save NAME]
 static int importCmd(int argc, char **argv) {
     const char *db = NULL, *save = NULL;
@@ -2865,22 +2878,24 @@ static int importCmd(int argc, char **argv) {
     char *text = NULL;
     int n = 0, rc = oplusRead(db, &text, &n);
     if (rc) return rc;
-    // the comments that say what was left out or is doubtful: on stderr too, unless they are on the screen already
-    if (save || !isatty(1))
-        for (const char *line = text; line && *line; line = strchr(line, '\n') ? strchr(line, '\n') + 1 : NULL)
-            if (!strncmp(line, "# skipped:", 10) || !strncmp(line, "# check:", 8))
-                fprintf(stderr, "%.*s\n", (int)strcspn(line, "\n"), line);
+    // The settings file (stdout, or the file of --save) holds the settings. What was left out or is doubtful is said on
+    // stderr, once, and is not in the file: the same output on a screen, in a pipe and in a file reads the same, and a
+    // caller that shows both streams sees every notice a single time.
     if (!save) {
-        fputs(text, stdout);
+        printLines(stdout, text, 0);
+        fflush(stdout);  // the settings first, then the notices
+        printLines(stderr, text, 1);
         free(text);
         return 0;
     }
+    printLines(stderr, text, 1);
     char path[PATH_MAX];
     configPath(save, path, sizeof path);
     makeConfigDir();
     FILE *f = fopen(path, "w");
     if (!f) { perror(path); free(text); return 1; }
-    int bad = fputs(text, f) < 0;
+    printLines(f, text, 0);
+    int bad = ferror(f);
     free(text);
     if (fclose(f) || bad) { perror(path); return 1; }
     printf("imported %d settings to %s\n", n, path);

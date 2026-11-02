@@ -39,8 +39,8 @@
   `~/Library/Application Support/LogiOptionsPlus`) into a settings file for `apply`, on stdout or in
   `~/.config/brioctl/NAME`. It needs no camera and opens the database read-only and immutable, with SQLite's JSON
   functions. Up to 21 settings come from the selected presets; manual exposure and gain, manual focus, pan and tilt
-  away from the centre, RightSight and the app's own options are listed as `# skipped:` lines, and manual white
-  balance is taken with a `# check:` line. It warns when `settings.db-wal` exists, because Logi Options+ is then
+  away from the centre, RightSight and the app's own options are listed as `# skipped:` notices on stderr, and manual
+  white balance is taken with a `# check:` notice. It warns when `settings.db-wal` exists, because Logi Options+ is then
   running and its latest changes are not read. Logi Tune keeps no settings file and cannot be imported.
 - Menu bar app, `brioctl.app` (macOS 13 or later, universal, ad-hoc signed and not notarized). A window with the
   settings of the chosen camera, drawn from `brioctl --json` (switches, menus, sliders with the camera's own ranges), a

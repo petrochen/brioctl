@@ -1253,9 +1253,13 @@ t_import_sample() {
         '^# imported from Logi Options\+ 2\.9\.994631 on [0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}$' || return 1
     expect "everything else" "$(printf '%s\n' "$out" | sed 1d)" "# camera 046d:0944
 # MX Brio, profile PROFILE_NAME_DEFAULT
-$OPLUS_LINES
-$OPLUS_NOTES" || return 1
-    expect "what is left out is said on stderr too" "$(cat err)" "$OPLUS_NOTES" || return 1
+$OPLUS_LINES" || return 1
+    # what is left out is said on stderr, and only there: the file has the settings
+    expect "what is left out is said on stderr" "$(cat err)" "$OPLUS_NOTES" || return 1
+    hasnt "no notice in the settings" "$out" "# skipped" || return 1
+    both=$("$BIN" import optionsplus optionsplus.db 2>&1)
+    expect "every notice once with both streams on one pipe" "$(printf '%s\n' "$both" | grep -c '^# skipped:')" 3 || return 1
+    expect "the same text without the notices" "$(printf '%s\n' "$both" | grep -v '^# skipped:')" "$out" || return 1
     # no camera is needed, and --camera has nothing to choose
     out2=$(env -u BRIOCTL_FAKE "$BIN" --camera 3 import optionsplus optionsplus.db 2> /dev/null); rc=$?
     expect "without a camera status" "$rc" 0 || return 1
@@ -1279,6 +1283,9 @@ t_import_save() {
     expect "stdout" "$out" "imported 20 settings to $HOME/.config/brioctl/fromapp" || return 1
     expect "what is left out is on stderr" "$(cat err)" "$OPLUS_NOTES" || return 1
     expect "the file" "$(sed 1d "$HOME/.config/brioctl/fromapp")" "$("$BIN" import optionsplus optionsplus.db 2> /dev/null | sed 1d)" || return 1
+    hasnt "no notice in the file" "$(cat "$HOME/.config/brioctl/fromapp")" "# skipped" || return 1
+    expect "every notice once with both streams on one pipe" \
+        "$("$BIN" import optionsplus optionsplus.db --save again 2>&1 | grep -c '^# skipped:')" 3 || return 1
     has "profiles lists it" "$("$BIN" profiles)" "  fromapp" || return 1
     # --save=NAME with a path, and the DB after it
     out=$("$BIN" import optionsplus --save="$PWD/second" optionsplus.db 2> /dev/null); rc=$?
@@ -1398,8 +1405,8 @@ EOF
     out=$("$BIN" import optionsplus v27.db 2> err); rc=$?
     expect "schema 27 status" "$rc" 0 || return 1
     expect "schema 27 settings" "$(printf '%s\n' "$out" | grep -v '^#')" "$OPLUS_LINES" || return 1
-    has "schema 27 warning in the file" "$out" "# check: Logi Options+ settings schema 27, brioctl was written for 26" || return 1
-    has "schema 27 warning on stderr" "$(cat err)" "# check: Logi Options+ settings schema 27"
+    hasnt "schema 27 warning not in the file" "$out" "# check:" || return 1
+    expect "schema 27 warning on stderr, once" "$(grep -c '^# check: Logi Options+ settings schema 27, brioctl was written for 26' err)" 1
 }
 
 t_import_leaves_the_database_alone() {
@@ -1544,25 +1551,26 @@ card("global")["webcamGlobalSettings"]["antiFlicker"] = 0
         noline "no $n line" "$out" "$n" || return 1
     done
     has "tilt is at the centre" "$out" "tilt 0" || return 1
-    has "manual white balance, with a warning" "$out" "awb off
-wb 4500
-# check: wb is taken as kelvin" || return 1
+    has "manual white balance" "$out" "awb off
+wb 4500" || return 1
     for s in "ae, exposure, gain (manual exposure" "af, focus (manual focus" "fov (70 has no equivalent)" \
         "zoom (500 is outside 100-400)" "pan (value 12 is in units brioctl does not know)" "flicker (0 has no equivalent)" \
         "vibrance (not in the Logi Options+ settings)" "micgain (no input volume between 0 and 1" \
         "rightsight (on in Logi Options+" "videoStabilization (no brioctl equivalent)" "noiseSuppression (no brioctl equivalent)"; do
-        has "skipped $s" "$out" "# skipped: $s" || return 1
+        has "skipped $s" "$(cat err)" "# skipped: $s" || return 1
     done
-    hasnt "an optional field that is not set is no news" "$out" "# skipped: tint" || return 1
-    hasnt "hdr" "$out" "# skipped: hdr" || return 1
-    hasnt "showmode" "$out" "# skipped: showmode" || return 1
-    has "the warnings are on stderr" "$(cat err)" "# check: wb is taken as kelvin" || return 1
+    hasnt "an optional field that is not set is no news" "$(cat err)" "# skipped: tint" || return 1
+    hasnt "hdr" "$(cat err)" "# skipped: hdr" || return 1
+    hasnt "showmode" "$(cat err)" "# skipped: showmode" || return 1
+    has "the warning is on stderr" "$(cat err)" "# check: wb is taken as kelvin" || return 1
+    hasnt "no notice in the settings" "$out" "# skipped" || return 1
+    hasnt "no warning in the settings" "$out" "# check:" || return 1
     # a white balance outside the camera's range is not half imported
     mkdb wb.db 'sel("video")["whiteBalance"] = {"mode": "MANUAL", "value": 9000}' || return 1
-    out=$("$BIN" import optionsplus wb.db 2> /dev/null)
+    out=$("$BIN" import optionsplus wb.db 2> err)
     noline "no awb" "$out" awb || return 1
     noline "no wb" "$out" wb || return 1
-    has "why" "$out" "# skipped: awb, wb (manual white balance 9000 is outside 2800-7500)" || return 1
+    has "why" "$(cat err)" "# skipped: awb, wb (manual white balance 9000 is outside 2800-7500)" || return 1
     # what is imported is still a settings file apply takes (the fake camera does not link awb to wb: allow wb now)
     "$BIN" import optionsplus odd.db --save odd > /dev/null 2>&1 || return 1
     edit_reg "$PU" 10 info 03

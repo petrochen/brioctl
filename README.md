@@ -380,8 +380,9 @@ brioctl import optionsplus ~/backup/settings.db    # read a copy of the database
 
 It reads `~/Library/Application Support/LogiOptionsPlus/settings.db`, or the file you name. The output starts with
 `# imported from ...` and `# camera 046d:0944` comments (so `apply` and `watch` know which model the file is for), then
-one `name value` line per setting, then `# skipped:` lines for everything it did not take over. With `--save`, or when
-the output goes to a file or a pipe, the `# skipped:` and `# check:` lines also go to stderr. Short example:
+one `name value` line per setting. What it did not take over (`# skipped:` lines) and what is doubtful (`# check:`
+lines) is said on stderr, once, and is not in the file, so the file is the same on a screen, in a pipe and with
+`--save`. Short example, as a terminal shows it (the `# skipped:` lines come on stderr):
 
 ```
 # imported from Logi Options+ 2.9.994631 on 2026-11-01 22:17
@@ -400,19 +401,19 @@ micgain 0.2785
 What it takes, for the preset each card of the app has selected in the profile `PROFILE_NAME_DEFAULT` (the first
 profile if there is none of that name), and the MX Brio first if the app knows several cameras:
 
-| Logi Options+                                 | brioctl                                             |
-| --------------------------------------------- | --------------------------------------------------- |
-| field of view 90, 78, 65; Show Mode; HDR      | `fov`, `showmode`, `hdr`                            |
-| warmth, tint, vibrance, exposure compensation | `warmth`, `tint`, `vibrance`, `expcomp`             |
-| zoom                                          | `zoom`                                              |
-| low-light priority                            | `priority exposure` or `fps`                        |
-| automatic exposure                            | `ae auto`                                           |
-| anti-flicker 50 or 60                         | `flicker`                                           |
-| brightness, contrast, saturation, sharpness   | the same names (only when set to manual)            |
-| white balance: automatic                      | `awb on`                                            |
-| white balance: manual                         | `awb off`, `wb`, with a `# check:` line (see below) |
-| autofocus                                     | `af on`                                             |
-| microphone volume (input)                     | `micgain`                                           |
+| Logi Options+                                 | brioctl                                               |
+| --------------------------------------------- | ----------------------------------------------------- |
+| field of view 90, 78, 65; Show Mode; HDR      | `fov`, `showmode`, `hdr`                              |
+| warmth, tint, vibrance, exposure compensation | `warmth`, `tint`, `vibrance`, `expcomp`               |
+| zoom                                          | `zoom`                                                |
+| low-light priority                            | `priority exposure` or `fps`                          |
+| automatic exposure                            | `ae auto`                                             |
+| anti-flicker 50 or 60                         | `flicker`                                             |
+| brightness, contrast, saturation, sharpness   | the same names (only when set to manual)              |
+| white balance: automatic                      | `awb on`                                              |
+| white balance: manual                         | `awb off`, `wb`, with a `# check:` notice (see below) |
+| autofocus                                     | `af on`                                               |
+| microphone volume (input)                     | `micgain`                                             |
 
 What it leaves out, and why:
 
@@ -421,16 +422,16 @@ What it leaves out, and why:
 - Manual focus, and pan or tilt away from the centre: the scale of the numbers is not known. Pan and tilt at the centre
   become `pan 0` and `tilt 0`.
 - Manual white balance is imported as kelvin, which is probably what it is but has not been checked against the
-  camera, so the file says `# check:` next to it. Values outside 2800 to 7500 are skipped.
+  camera, so brioctl prints a `# check:` notice for it. Values outside 2800 to 7500 are skipped.
 - RightSight (Logitech's app does the framing on the computer), the video preview, background blur and the like: they
   are not camera settings. They are listed by name when the app has them on.
 - The camera microphone on and off (`mic`). The app does not keep it in this file, so the imported file has no `mic`
   line and `apply` leaves the microphone as it is.
 - A field the app left out is not guessed. Optional ones (HDR, Show Mode, tint, anti-flicker) give no line and no
-  comment; any other missing or out-of-range field gets a `# skipped:` line.
+  notice; any other missing or out-of-range field gets a `# skipped:` notice.
 
 The format was read from Logi Options+ 2.9.994631 (settings schema 26). Another schema version is imported too, with a
-`# check:` line and a warning. A file that does not look like Logi Options+ settings is an error that names the schema
+`# check:` notice. A file that does not look like Logi Options+ settings is an error that names the schema
 version it found. The database is opened read-only and immutable, so a running Logi Options+ is not disturbed, but
 changes it still holds in `settings.db-wal` are not seen. When that file exists, Logi Options+ is running (or did not
 quit cleanly): brioctl prints a warning on stderr, and quitting the app before the import fixes it. Logi Tune is not
