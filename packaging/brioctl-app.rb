@@ -24,9 +24,16 @@ cask "brioctl-app" do
 
   uninstall quit: "com.github.petrochen.brioctl.app"
 
+  # Only what the app alone creates: its "Launch at login" agent (com.github.petrochen.brioctl.app), its defaults
+  # domain and its caches. Left out on purpose: ~/Library/LaunchAgents/com.github.petrochen.brioctl.plist, the
+  # `brioctl watch` agent. The CLI installs it under the same label (`make agent`), so zapping the app must not
+  # remove the CLI's agent; the caveats tell the user to turn the app's own copy off before uninstalling. The same
+  # goes for ~/.config/brioctl (the settings file) and ~/Library/Logs/brioctl.log, which the CLI shares.
   zap trash: [
+    "~/Library/Caches/com.github.petrochen.brioctl.app",
     "~/Library/LaunchAgents/com.github.petrochen.brioctl.app.plist",
     "~/Library/Preferences/com.github.petrochen.brioctl.app.plist",
+    "~/Library/Saved Application State/com.github.petrochen.brioctl.app.savedState",
   ]
 
   caveats <<~EOS
