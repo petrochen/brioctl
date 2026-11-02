@@ -2316,7 +2316,7 @@ static void usage(FILE *f) {
                "       brioctl profiles [--json]   list presets and saved files\n"
                "       brioctl import optionsplus [DB] [--save NAME]\n"
                "                                   Logi Options+ camera settings as a settings file; no camera\n"
-               "       brioctl defaults            camera defaults for the settings below except mic and showmode\n"
+               "       brioctl defaults            camera defaults, except mic, showmode and privacy\n"
                "       brioctl watch [FILE]        apply FILE now, when the camera is connected and when video starts\n"
                "       brioctl factory-reset --yes restart the MX Brio with factory settings, then restore yours\n"
                "       brioctl dump                list all UVC units and extension controls (read-only)\n"

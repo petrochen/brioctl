@@ -876,7 +876,9 @@ t_defaults_any_camera() {
     "$BIN" defaults > out || return 1
     has "fov default" "$(cat out)" "fov 90" || return 1
     hasnt "showmode untouched" "$(cat out)" showmode || return 1
-    expect "showmode" "$("$BIN" get showmode)" off
+    expect "showmode" "$("$BIN" get showmode)" off || return 1
+    # the usage line names what defaults leaves alone (explicitOnly: privacy; and the two whose GET_DEF is wrong)
+    has "usage says what defaults skips" "$("$BIN" --help)" "camera defaults, except mic, showmode and privacy"
 }
 
 t_save_names_the_camera() {
