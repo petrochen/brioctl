@@ -1,23 +1,46 @@
 import XCTest
 @testable import BrioctlCore
 
-final class RecordingLaunchctl: LaunchctlRunning {
-    var events: [String] = []
-    var bootstrapFails: String?
-    var loaded: Set<String> = []
+/// Records what the app asks of launchd. The app model calls it from the main actor while a test may read it from
+/// another thread, so the state sits behind a lock.
+final class RecordingLaunchctl: LaunchctlRunning, @unchecked Sendable {
+    private let lock = NSLock()
+    private var recordedEvents: [String] = []
+    private var failure: String?
+    private var loadedLabels: Set<String> = []
+
+    var events: [String] {
+        get { lock.withLock { recordedEvents } }
+        set { lock.withLock { recordedEvents = newValue } }
+    }
+
+    var bootstrapFails: String? {
+        get { lock.withLock { failure } }
+        set { lock.withLock { failure = newValue } }
+    }
+
+    var loaded: Set<String> {
+        get { lock.withLock { loadedLabels } }
+        set { lock.withLock { loadedLabels = newValue } }
+    }
 
     func bootstrap(plist: URL) throws {
-        events.append("bootstrap \(plist.lastPathComponent)")
-        if let bootstrapFails { throw LaunchAgentError.launchctl(bootstrapFails) }
-        loaded.insert(plist.deletingPathExtension().lastPathComponent)
+        let fails = lock.withLock { () -> String? in
+            recordedEvents.append("bootstrap \(plist.lastPathComponent)")
+            if failure == nil { loadedLabels.insert(plist.deletingPathExtension().lastPathComponent) }
+            return failure
+        }
+        if let fails { throw LaunchAgentError.launchctl(fails) }
     }
 
     func bootout(label: String) {
-        events.append("bootout \(label)")
-        loaded.remove(label)
+        lock.withLock {
+            recordedEvents.append("bootout \(label)")
+            loadedLabels.remove(label)
+        }
     }
 
-    func isLoaded(label: String) -> Bool { loaded.contains(label) }
+    func isLoaded(label: String) -> Bool { lock.withLock { loadedLabels.contains(label) } }
 }
 
 final class LaunchAgentTests: XCTestCase {

@@ -16,15 +16,33 @@ enum Fixture {
 }
 
 /// A scripted CLI: records every call and answers from a closure.
-final class StubRunner: CLIRunning {
-    var calls: [[String]] = []
-    var answer: ([String]) -> CLIResult
+///
+/// `run` is nonisolated and async, so a debounced save of the store appends to `calls` from a pool thread while the test
+/// reads `writes` on another one. Every access to the mutable state goes through `lock`; `answer` is copied out before it
+/// is called, so a closure may use the stub (or another one) without deadlocking.
+final class StubRunner: CLIRunning, @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [[String]] = []
+    private var responder: ([String]) -> CLIResult
 
-    init(_ answer: @escaping ([String]) -> CLIResult = { _ in CLIResult(status: 0) }) { self.answer = answer }
+    init(_ answer: @escaping ([String]) -> CLIResult = { _ in CLIResult(status: 0) }) { responder = answer }
+
+    var calls: [[String]] {
+        get { lock.withLock { recorded } }
+        set { lock.withLock { recorded = newValue } }
+    }
+
+    var answer: ([String]) -> CLIResult {
+        get { lock.withLock { responder } }
+        set { lock.withLock { responder = newValue } }
+    }
 
     func run(_ arguments: [String]) async -> CLIResult {
-        calls.append(arguments)
-        return answer(arguments)
+        let respond = lock.withLock { () -> ([String]) -> CLIResult in
+            recorded.append(arguments)
+            return responder
+        }
+        return respond(arguments)
     }
 
     var writes: [[String]] {
