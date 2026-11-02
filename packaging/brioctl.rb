@@ -1,10 +1,10 @@
 # Copy of Formula/brioctl.rb in petrochen/homebrew-tap. On a new release: update url and sha256
-# (curl -sL <url> | shasum -a 256) here and in the tap. sha256 stays "TODO" until the v1.1.0 tag exists.
+# (curl -sL <url> | shasum -a 256) here and in the tap.
 class Brioctl < Formula
   desc "Command-line control for the Logitech MX Brio webcam"
   homepage "https://github.com/petrochen/brioctl"
   url "https://github.com/petrochen/brioctl/archive/refs/tags/v1.1.0.tar.gz"
-  sha256 "TODO"
+  sha256 "408b17711295d2ee14dadbc9a40332129e9d4c303b47fd2304e2e94113d4de28"
   license "MIT"
 
   depends_on :macos

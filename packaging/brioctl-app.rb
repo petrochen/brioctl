@@ -1,11 +1,11 @@
 # Copy of Casks/brioctl-app.rb in petrochen/homebrew-tap. On a new release: update version and sha256
 # (curl -sL <url> | shasum -a 256, or shasum -a 256 app/build/brioctl-app-<version>.zip) here and in the tap.
-# The zip is built and attached to the GitHub release by CI (make app-zip); sha256 stays "TODO" until the tag exists.
+# The zip is built and attached to the GitHub release by CI (make app-zip).
 # Written for the current Homebrew DSL (postflight_steps, depends_on macos: :ventura). Homebrew before 7 wants
 # `postflight do system_command "/usr/bin/xattr", args: [...] end` and `depends_on macos: ">= :ventura"` instead.
 cask "brioctl-app" do
   version "1.1.0"
-  sha256 "TODO"
+  sha256 "7c929fbb950a5b7111814bef3138fc9d9da811d2bef4a08f7891d69756472791"
 
   url "https://github.com/petrochen/brioctl/releases/download/v#{version}/brioctl-app-#{version}.zip"
   name "brioctl"
