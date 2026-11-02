@@ -439,9 +439,9 @@ settings instead.
 
 ## JSON
 
-`brioctl --json` prints one JSON object on one line, for scripts and apps (the menu bar app is built on `--json`, `list --json` and `profiles --json`). Errors
-are not JSON: they go to stderr as text with a non-zero exit status (1 for an error, 2 when the camera cannot be chosen
-or the command line is wrong). A shortened example, formatted for reading:
+`brioctl --json` prints one JSON object on one line, for scripts and apps (the menu bar app is built on `--json`,
+`list --json` and `profiles --json`). Errors are not JSON: they go to stderr as text with a non-zero exit status (1 for
+an error, 2 when the camera cannot be chosen or the command line is wrong). A shortened example, formatted for reading:
 
 ```json
 {
@@ -523,8 +523,9 @@ or the command line is wrong). A shortened example, formatted for reading:
 
 `brioctl list --json` prints `{"cameras":[{"index":1,"vid":"046d","pid":"0944","name":"MX Brio","model":"MX Brio",
 "support":"full","serial":"...","location":"0x110000"}]}`. `brioctl profiles --json` prints
-`{"presets":[{"name":"warmer","settings":{"warmth":"60"}}],"saved":["meeting","settings"],"dir":"/Users/you/.config/brioctl"}`.
-`brioctl get NAME` prints one value as `show` writes it (`on`, `78`, `62`) and exits with 1 if the camera cannot read it.
+`{"presets":[{"name":"warmer","settings":{"warmth":"60"}}],"saved":["meeting","settings"],
+"dir":"/Users/you/.config/brioctl"}`. `brioctl get NAME` prints one value as `show` writes it (`on`, `78`, `62`) and
+exits with 1 if the camera cannot read it.
 
 ## Apply settings automatically
 
