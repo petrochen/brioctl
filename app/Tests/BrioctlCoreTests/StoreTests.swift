@@ -86,7 +86,7 @@ final class StoreWithStubTests: XCTestCase {
         await store.refresh()
         stub.calls = []
         for v in [120.0, 130, 140] {
-            store.change("zoom", to: SettingValue.format(v), shown: .number(v), delay: 0.1)
+            store.change("zoom", to: SettingValue.format(v), shown: .number(v), delay: 1)
             try await Task.sleep(nanoseconds: 30_000_000)
         }
         XCTAssertEqual(store.pending["zoom"], .number(140), "the slider shows what the user did meanwhile")
