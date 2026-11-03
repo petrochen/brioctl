@@ -5,3 +5,4 @@
 /tools/hidmon
 /tools/uvcwatch
 /tests/brioctl-fake.dSYM
+/brioctl-info.generated.plist*
