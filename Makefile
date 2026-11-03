@@ -1,6 +1,6 @@
 CFLAGS ?= -Wall -Wextra -Wno-missing-field-initializers -O2
 # Plain assignment: make VERSION=x overrides it, the environment does not.
-VERSION = 1.1.0
+VERSION = 1.2.0
 PREFIX ?= $(HOME)
 LABEL = com.github.petrochen.brioctl
 AGENT = $(HOME)/Library/LaunchAgents/$(LABEL).plist

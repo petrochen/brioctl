@@ -7,7 +7,7 @@
 #   make clean
 
 # Plain assignment: make VERSION=x overrides it, the environment does not.
-VERSION = 1.1.0
+VERSION = 1.2.0
 
 # The CLI is built from ../brioctl.c with the flags of the root Makefile (make universal), into build/cli, so the
 # ./brioctl of the repository is left alone.
