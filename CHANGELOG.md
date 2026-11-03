@@ -4,6 +4,14 @@
 
 ### Added
 
+- `brioctl auto [--target face|frame] [--dry-run] [--save] [--max-steps N] [--json] [--framing] [--wait SEC]` measures
+  the picture, nudges `expcomp`, `hdr` and `warmth` (or `wb` with `awb` off) by a small step, and measures again, up to
+  4 steps by default. The rules are a short table (README, "Automatic adjustment"); it stays in `expcomp` 96-176 and
+  `warmth` 30-70, and touches `fov` and `zoom` only with `--framing`, never `mic` or `privacy`. Changes go through the
+  normal set path, so `--dry-run`, `--save` and `undo` work, and one `undo` takes back the whole run.
+- `capture` reports the largest face of each frame (Vision, on the picture reduced to 640 pixels wide): `"face"` with
+  the frame's statistics over the face box enlarged by 20%, `faces`, `face_fraction` and `face_center`, or `null`. Text
+  mode with `--stats` adds a `face` block. `--no-face` skips Vision. Links `-framework Vision`.
 - `brioctl capture [-o PATH] [--count N] [--interval SEC] [--wait SEC] [--size WxH] [--stats] [--json]` grabs frames
   from the chosen camera with AVFoundation and writes JPEG files, while another app may be using the camera. `--stats`
   and `--json` report the luma mean, 5th and 95th percentile and contrast, clipped shadows and highlights, saturation,
@@ -36,6 +44,7 @@
 
 ### Changed
 
+- `undo` keeps the value from before the first write of a control within one command, instead of one entry per write.
 - `make` with no target builds the CLI (the first rule used to be the Info.plist).
 - A `-N` value on a named control (`fov -1`, `backlight -1`) now exits with status 2 instead of 1; `-N` on an unsigned
   number (`warmth -1`) is a relative change instead of an out-of-range error.

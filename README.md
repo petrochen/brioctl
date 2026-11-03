@@ -254,7 +254,7 @@ persists for [`watch`](#apply-settings-automatically).
 Two commands for scripts and AI agents that adjust the camera and want to check the result.
 
 ```sh
-brioctl capture [-o PATH] [--count N] [--interval SEC] [--wait SEC] [--size WxH] [--stats] [--json]
+brioctl capture [-o PATH] [--count N] [--interval SEC] [--wait SEC] [--size WxH] [--stats] [--json] [--no-face]
 brioctl describe [--json]
 ```
 
@@ -297,6 +297,12 @@ frames when there are several):
 `--json` prints `{"files":[...],"frames":[{...}],"avg":{...}}` on one line and always includes the statistics. Without
 `--json` and `--stats` the command prints the file names only.
 
+**Face region.** Each frame (and `avg`) also has `"face": {...}`, or `null` when no face is found. Vision finds the
+faces on the picture reduced to at most 640 pixels wide; the largest one is measured, over its box enlarged by 20%, with
+the same fields as the frame (`y_mean` to `sharpness`, without `width` and `height`), plus `faces` (how many were
+found), `face_fraction` (box area / frame area) and `face_center` (`x`, `y`, 0 to 1 from the top left). Text mode with
+`--stats` adds a `face` block. `--no-face` skips Vision (`"face": null`). `avg` averages the frames that have a face.
+
 ```sh
 brioctl capture --stats --json                    # one frame and its numbers
 brioctl capture --count 3 --interval 0.5 --stats  # three frames, the numbers of each, and the average
@@ -318,14 +324,58 @@ brioctl warmth 40 && sleep 1 && brioctl capture -o cool.jpg --stats   # change a
 
 `describe` only reads. The microphone volume (`micgain`) is listed too, for the MX Brio.
 
+## Automatic adjustment
+
+```sh
+brioctl auto [--target face|frame] [--dry-run] [--save] [--max-steps N] [--json] [--framing] [--wait SEC] [--camera ID]
+```
+
+`auto` measures the picture, changes one or two controls by a small step, waits, measures again, and stops when the
+picture is in range, when a step did not help, or after `--max-steps` steps (default 4, at most 10). It uses the face
+box of `capture` (`--target face`, the default) and judges the whole frame when it finds no face or with `--target
+frame`. It is a handful of rules, not a model, and every change goes through the normal set path: the camera's checks,
+`--dry-run`, `--save` and `undo` work as for a typed command. One `brioctl undo` takes back the whole run.
+
+| Rule          | When (face; whole frame for `--target frame`)   | What                                                |
+| ------------- | ----------------------------------------------- | --------------------------------------------------- |
+| exposure      | `y_mean` under 105 or over 140 (frame: 90-140)  | `expcomp` +12 or -12, kept in 96-176                |
+| highlights    | frame `clip_high_pct` over 3, `y_mean` in range | `hdr on` (once); if already on, a note              |
+| shadows       | `clip_low_pct` over 5, `y_mean` not over 140    | `hdr on`, else `expcomp` +8 (kept in 96-176)        |
+| white balance | `wb_bias` over 1.12 or under 0.90               | `warmth` -6 / +6 (30-70); `awb` off: `wb` -/+ 300 K |
+| framing       | `face_fraction` under 0.04                      | a note; `--framing`: `fov -`, then `zoom +25`       |
+| focus         | frame `sharpness` under half of the first one   | a note only                                         |
+
+`auto` never writes anything else: not `mic`, `privacy`, `fov` or `zoom` (the last two only with `--framing`, and then
+the wait after a change is 3.5 s). A control already outside a safety band is only moved back towards it. `--wait` is
+the time before each frame (default 1 s).
+
+`--dry-run` takes one frame and prints what step 1 would do; nothing is written. `--save` runs `brioctl save` at the
+end. Without a face, the output says so (`note`). Status 3 means camera access is denied, as for `capture`.
+
+```
+$ brioctl auto
+step 1  face   y_mean   90.7  clip_low   0.0%  clip_high(frame)   1.6%  wb_bias  1.41  sharpness    104.2
+        expcomp 128 -> 140  (face y_mean 91 is below 105-140)
+        warmth 62 -> 56  (face wb_bias 1.41 is above 1.12)
+step 2  face   y_mean  104.5  ...
+after   face   y_mean  118.3  clip_low   0.0%  clip_high(frame)   1.6%  wb_bias  1.12  sharpness     53.4
+stopped: in_range
+```
+
+`--json` prints one object: `target`, `dry_run`, `steps` (`[{"step", "stats", "changes": [{"name", "from", "to",
+"why"}]}]`, where `stats` is what the step started from), `before` and `after` (same shape as `stats`; `after` is `null`
+for `--dry-run`), `applied` (`{name: value}` of what was written), `recommendations` (notes, nothing was done), `note`,
+`saved` and `stopped`: `in_range`, `no_improvement`, `max_steps` or `dry_run`.
+
 ## For AI agents
 
 An AI coding or desktop agent (Claude Code, Codex, Cursor, Raycast AI) can operate the camera through the CLI alone,
-with no MCP server: `brioctl --json` and `brioctl describe --json` to read, `brioctl NAME VALUE` to change, and `brioctl
-capture --json` to measure the picture. [docs/agents.md](docs/agents.md) describes the read, act, verify loop, what each
-control does, how to read the capture numbers and what an agent must not touch. For Claude Code and Codex,
-[skills/brioctl/SKILL.md](skills/brioctl/SKILL.md) is a compact skill that can be copied to `~/.claude/skills/brioctl/`
-or `~/.codex/skills/brioctl/`. `brioctl install-skill` does the copy:
+with no MCP server: `brioctl --json` and `brioctl describe --json` to read, `brioctl auto --json` for a first measured
+adjustment, `brioctl NAME VALUE` to change by hand, and `brioctl capture --json` to measure the picture.
+[docs/agents.md](docs/agents.md) describes the read, act, verify loop, what each control does, how to read the capture
+numbers and what an agent must not touch. For Claude Code and Codex, [skills/brioctl/SKILL.md](skills/brioctl/SKILL.md)
+is a compact skill that can be copied to `~/.claude/skills/brioctl/` or `~/.codex/skills/brioctl/`. `brioctl
+install-skill` does the copy:
 
 ```sh
 brioctl install-skill               # ~/.claude/skills/brioctl and ~/.codex/skills/brioctl, where they exist

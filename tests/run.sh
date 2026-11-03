@@ -2181,6 +2181,10 @@ for f in d["frames"] + [d["avg"]]:
     assert set(face["face_center"]) == {"x", "y"} and all(0 <= v <= 1 for v in face["face_center"].values())
     assert face["y_mean"] != f["y_mean"] and 0 <= face["y_p5"] <= face["y_mean"] <= face["y_p95"] <= 255
 PY
+    y0=$("$BIN" capture --json | python3 -I -c 'import json, sys; print(json.load(sys.stdin)["avg"]["face"]["y_mean"])')
+    "$BIN" expcomp 150 > /dev/null || return 1
+    y1=$("$BIN" capture --json | python3 -I -c 'import json, sys; print(json.load(sys.stdin)["avg"]["face"]["y_mean"])')
+    python3 -I -c "import sys; assert float(sys.argv[2]) > float(sys.argv[1]) + 10, sys.argv" "$y0" "$y1" || return 1
     out=$("$BIN" capture --stats 2>&1)
     has "face block" "$out" "face_fraction" || return 1
     has "face block" "$out" "faces" || return 1

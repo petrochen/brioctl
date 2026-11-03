@@ -15,7 +15,9 @@ affects every app that uses the camera, such as Zoom, Meet, FaceTime and OBS.
 
 ## The loop: read, act, verify
 
-Never guess what the camera has or what it is set to. Work in this order:
+Never guess what the camera has or what it is set to. Start with `brioctl auto --json` (add `--dry-run` to see the plan
+first): it measures the face, changes `expcomp`, `hdr` and `warmth` in small steps and says what it did. Then verify
+with a frame and tune by hand only what is still wrong. The loop by hand, in this order:
 
 1. **Read.** `brioctl --json` prints one JSON object with the camera, its status (`video` on or off) and every setting
    with its value, default, range and whether an automatic mode is setting it right now. `brioctl describe --json` adds,
@@ -138,6 +140,11 @@ It needs camera permission for the app you ran `brioctl` from (Terminal, an edit
 asks once. If it was refused, `capture` says how to change it (System Settings, Privacy & Security, Camera) and exits
 with status 3. Relay that to the user; you cannot grant it yourself.
 
+Each frame and `avg` also have `face` (`null` without a face; `--no-face` skips the detection): the same statistics
+over the largest face box enlarged by 20%, plus `faces`, `face_fraction` (box area / frame area) and `face_center`
+(`x`, `y`, 0 to 1 from the top left). Judge exposure and white balance on `face` when it is there: a window or a wall
+skews the frame numbers. `face_fraction` below 0.04 means the face is small in the picture: `fov -` or `zoom +25`.
+
 Per frame and in `avg`: `width`, `height`, `y_mean`, `y_p5`, `y_p95`, `y_stddev`, `clip_low_pct`, `clip_high_pct`,
 `saturation_mean`, `rgb_mean` (`r`, `g`, `b`), `wb_bias` and `sharpness`.
 
@@ -155,6 +162,18 @@ Per frame and in `avg`: `width`, `height`, `y_mean`, `y_p5`, `y_p95`, `y_stddev`
 
 The thresholds are rules of thumb. Look at the JPEG too if you can view images. Average over `--count 3 --interval 1` to
 avoid a bad single frame, and note that auto exposure changes the numbers from frame to frame.
+
+## `brioctl auto`
+
+`brioctl auto --json` is the first step for "I look too dark/warm". Each step takes a frame, judges the face (the frame
+when there is none, and then `note` says so) and changes at most `expcomp` +-12 (kept in 96-176), `hdr on`, and `warmth`
++-6 (kept in 30-70; `wb` +-300 K with `awb` off), then waits 1 s and measures again. It stops with `stopped`:
+`in_range`, `no_improvement`, `max_steps` (default 4) or `dry_run`. It never touches `mic`, `privacy`, `fov` or `zoom`;
+with `--framing` it may step `fov -` and `zoom +25` when `face_fraction` is below 0.04, otherwise it only puts that in
+`recommendations`. `--dry-run` takes one frame and lists step 1 without writing; `--save` keeps the result; one
+`brioctl undo` reverts the whole run. Read `before`, `after` and `applied`, check the picture, and correct by hand what
+`recommendations` points at (framing, focus, a blown window with `hdr` already on). The rule table is in the README,
+"Automatic adjustment".
 
 ## Worked example: "make me brighter but keep the window from blowing out"
 

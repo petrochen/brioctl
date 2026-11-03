@@ -2679,6 +2679,8 @@ static int parseSeconds(const char *s, double *out) {
     return *end || *out > 3600 ? -1 : 0;
 }
 
+static void captureState(Cam *c, struct capture_opts *o);
+
 static int captureCmd(int argc, char **argv, const char *camId) {
     struct capture_opts o = {.path = "capture.jpg", .count = 1, .interval = 1, .wait = 1.0};
     int stats = 0, json = 0;
@@ -2723,6 +2725,10 @@ static int captureCmd(int argc, char **argv, const char *camId) {
     o.pid = target.pid;
     o.loc = target.loc;
     static struct capture_result r;  // large: about 100 KB
+#ifdef BRIOCTL_FAKE
+    Cam fc;  // the synthetic picture follows the fake camera's settings; a read only
+    if (!openCam(&fc)) captureState(&fc, &o), closeCam(&fc);
+#endif
     rc = brioctl_capture(&o, &r);
     if (rc) fprintf(stderr, "%s\n", r.error);
     if (r.n == 0) return rc;
@@ -2997,16 +3003,21 @@ static void autoRead(Cam *c, AutoCtx *x) {
     x->hasZoom = !autoNum(c, "zoom", &x->zoom);
 }
 
+// The fake picture follows the fake camera's expcomp, warmth and hdr (the real build ignores these fields).
+static void captureState(Cam *c, struct capture_opts *o) {
+    long v;
+    char s[16];
+    if (!autoNum(c, "expcomp", &v)) o->expcomp = (int)v, o->have_state = 1;
+    if (!autoNum(c, "warmth", &v)) o->warmth = (int)v;
+    if (!autoStr(c, "hdr", s)) o->hdr = !strcmp(s, "on");
+}
+
 // One frame, judged on the face when --target face finds one. Returns the status of capture.
 static int autoShoot(Cam *c, const char *path, double wait, int wantFace, AutoShot *out) {
     static struct capture_result r;
     struct capture_opts o = {.path = path, .count = 1, .wait = wait, .no_face = !wantFace};
     o.vid = target.vid, o.pid = target.pid, o.loc = target.loc;
-    long v;
-    if (!autoNum(c, "expcomp", &v)) o.expcomp = (int)v, o.have_state = 1;
-    if (!autoNum(c, "warmth", &v)) o.warmth = (int)v;
-    char s[16];
-    if (!autoStr(c, "hdr", s)) o.hdr = !strcmp(s, "on");
+    captureState(c, &o);
     int rc = brioctl_capture(&o, &r);
     if (rc || r.n < 1) {
         fprintf(stderr, "%s\n", r.error[0] ? r.error : "capture failed");

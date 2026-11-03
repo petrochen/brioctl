@@ -9,7 +9,13 @@ description: Read and change webcam settings on macOS with the brioctl CLI (Logi
 `docs/agents.md` in the brioctl repo. Ranges differ per camera: **`brioctl describe --json` is the source of truth** for
 names, ranges, defaults, settle times and risky controls. Use only controls it lists.
 
-## Loop: read, act, verify
+## Loop: auto, verify, hand-tune
+
+Start with `brioctl auto --json` (`--dry-run` first if unsure): it measures the face, changes `expcomp` / `hdr` /
+`warmth` in up to 4 small steps (`expcomp` stays 96-176, `warmth` 30-70), never `mic`, `privacy`, `fov` or `zoom`
+(`--framing` allows `fov -` / `zoom +25` for a small face), and returns `before`, `after`, `applied`,
+`recommendations`, `stopped`. One `brioctl undo` reverts the run; `--save` keeps it. Then verify with a frame and fix by
+hand only what is left:
 
 1. Read: `brioctl --json` (settings, `status.video.on`), `brioctl describe --json`, and
    `brioctl capture --json -o frame.jpg` (measure the picture; `--json` implies `--stats`).
@@ -59,6 +65,7 @@ Everything else: 0.3 s. `mic` also restarts the camera about 2 s after a change.
 
 ## Reading `capture --stats`
 
+- `face` (in `capture --json`, `null` if none): the same numbers over the face box; judge on it when present.
 - `y_mean` (0-255): roughly 90-140 for a face in a normal room; judge by clipping and by looking at the frame.
   Low with no clipping: raise `expcomp`. High: lower it.
 - `clip_high_pct` (luma > 235) above 2: blown highlights. Lower `expcomp` or turn `hdr on`.
