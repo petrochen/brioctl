@@ -13,7 +13,7 @@ VERSION = 1.1.0
 # ./brioctl of the repository is left alone.
 CFLAGS ?= -Wall -Wextra -Wno-missing-field-initializers -O2
 LIBS = -framework IOKit -framework CoreFoundation -framework CoreAudio -framework CoreMediaIO -lsqlite3 \
-	-framework AVFoundation -framework CoreMedia -framework CoreVideo -framework ImageIO -framework CoreGraphics
+	-framework AVFoundation -framework CoreMedia -framework CoreVideo -framework ImageIO -framework CoreGraphics -framework Vision
 UNIVERSAL = -arch arm64 -arch x86_64 -mmacosx-version-min=12.0
 
 BUILD = build
@@ -25,6 +25,7 @@ all: $(APP)
 
 # Always rebuilt: the binary embeds VERSION, which can differ from run to run (make zip VERSION=x).
 cli:
+	$(MAKE) -C .. skill-embedded.h
 	mkdir -p $(BUILD)/cli
 	sed 's|@VERSION@|$(VERSION)|g' ../brioctl-info.plist > $(BUILD)/cli/info.plist
 	$(CC) $(CFLAGS) -DVERSION=\"$(VERSION)\" $(UNIVERSAL) -fobjc-arc -o $(BUILD)/cli/brioctl ../brioctl.c ../capture.m $(LIBS) \
