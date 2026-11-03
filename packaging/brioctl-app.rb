@@ -5,7 +5,7 @@
 # `postflight do system_command "/usr/bin/xattr", args: [...] end` and `depends_on macos: ">= :ventura"` instead.
 cask "brioctl-app" do
   version "1.2.0"
-  sha256 "7c929fbb950a5b7111814bef3138fc9d9da811d2bef4a08f7891d69756472791"
+  sha256 "f4b578329046aa125f10e4dd1ba3b386559d9cf268ae45dc1cb46beae0887b01"
 
   url "https://github.com/petrochen/brioctl/releases/download/v#{version}/brioctl-app-#{version}.zip"
   name "brioctl"
