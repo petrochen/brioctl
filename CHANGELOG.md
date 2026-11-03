@@ -14,8 +14,31 @@
   it means, what it does to the picture, how long to wait after a change (`settle_seconds`) and whether changing it
   interrupts the video (`risky`). It only reads.
 
+- Relative values: `brioctl expcomp +10 warmth -5 zoom +25` adds to the current value of a numeric control and clamps
+  to the camera's range; named controls (`hdr +1`) exit with status 2. On signed controls (`pan`, `tilt`, `roll`,
+  `brightness`, `hue`) `-N` stays a negative absolute value and `+-N` subtracts. `fov +` and `fov -` step to the next
+  wider or narrower angle (65, 78, 90). A settings file cannot hold a relative value.
+- `--dry-run` (before or after the command) for setting values, `apply`, `defaults` and `undo`: prints `NAME old ->
+  new` or `NAME value unchanged` and writes nothing; with `--json` it prints
+  `{"changes":[{"name","from","to","unchanged"}]}`.
+- `brioctl undo` puts back what the last changing command replaced. Before a write, the old values of the controls
+  about to change are kept in `~/.config/brioctl/undo` (set, `apply`, `defaults`, the restore of `factory-reset`);
+  `undo` rewrites the file with what it replaced, so a second `undo` redoes the change. `undo --dry-run` shows it
+  first.
+- `--save` after setting values, `apply`, `defaults` or `undo` runs `brioctl save` after a successful write, so the
+  change survives the next video start under `watch`. The README's watch section says that unsaved changes are
+  reverted.
+- `brioctl install-skill [--claude|--codex|--all] [--uninstall]` copies the AI agent skill to
+  `~/.claude/skills/brioctl` and `~/.codex/skills/brioctl` (by default only where `~/.claude` / `~/.codex` exist). It
+  reads `skills/brioctl/SKILL.md` next to the binary, else `../share/brioctl/skills/brioctl/SKILL.md`, else the copy
+  built into the binary (the Makefile generates `skill-embedded.h` from the skill file). `make install` and the
+  Homebrew formula install the skill into `share/brioctl/skills/brioctl/`.
+
 ### Changed
 
+- `make` with no target builds the CLI (the first rule used to be the Info.plist).
+- A `-N` value on a named control (`fov -1`, `backlight -1`) now exits with status 2 instead of 1; `-N` on an unsigned
+  number (`warmth -1`) is a relative change instead of an out-of-range error.
 - The Makefile builds `capture.m` with `-fobjc-arc` and links AVFoundation, CoreMedia, CoreVideo, ImageIO and
   CoreGraphics.
 

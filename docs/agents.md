@@ -202,9 +202,25 @@ Settings live in the camera, and some are lost when the camera loses power or th
   It puts `~/.config/brioctl/settings` back, so a change that you make and do not save is undone at the next video
   start. After a change the user wants to keep, run `brioctl save` (when a `watch` agent is installed) or ask the user
   to use "Remember current settings" in the menu bar app.
+- `brioctl expcomp +10 --save` changes a value and saves in one step (`--save` also works with `apply`, `defaults` and
+  `undo`). Without it a change is gone after the next video start when `watch` runs.
 - `save` does not store values that an automatic mode is setting.
 
 Ask before you `save` over the user's existing file.
+
+## Relative values, dry run and undo
+
+- **Relative values.** `brioctl expcomp +10 warmth -5 zoom +25` adds to the current value and clamps to the camera's
+  range, so you do not need to read first. It works on numbers only; `hdr +1` or `flicker -` exits with status 2 and
+  writes nothing. `fov +` and `fov -` step to the next wider or narrower angle (65, 78, 90). On a signed control
+  (`pan`, `tilt`, `roll`, `brightness`, `hue`) `-10` is the absolute value -10; write `+-10` to subtract.
+- **`--dry-run`** (anywhere in the line) prints `NAME old -> new` or `NAME value unchanged` and writes nothing; with
+  `--json` it prints `{"changes":[{"name","from","to","unchanged"}]}`. Use it before an `apply`, `defaults` or a
+  large change you want to describe to the user. Values are checked as for a real write.
+- **`brioctl undo`** puts back what the last changing command replaced (`set`, `apply`, `defaults`). It keeps the old
+  values in `~/.config/brioctl/undo`, and the undo itself can be undone. Offer it when the user dislikes a change.
+  `brioctl undo --dry-run` shows what it would do. Only the last command is kept.
+- `brioctl install-skill` copies this skill into `~/.claude/skills/brioctl` and `~/.codex/skills/brioctl`.
 
 ## Errors and exit codes
 

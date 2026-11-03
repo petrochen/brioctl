@@ -161,7 +161,8 @@ From source:
 make && make install
 ```
 
-`make install` copies the binary to `~/bin` by default. Choose another place with `PREFIX`:
+`make install` copies the binary to `~/bin` and the skill to `~/share/brioctl/skills/brioctl/` by default. Choose
+another place with `PREFIX`:
 
 ```sh
 make && sudo make install PREFIX=/usr/local   # installs /usr/local/bin/brioctl
@@ -181,6 +182,10 @@ brioctl --camera 2 fov 78            # use another camera: an index or serial nu
 brioctl --json                       # the same as one JSON object, for scripts
 brioctl get fov                      # print one value only (settings and micgain); exit code 1 if unreadable
 brioctl fov 78 zoom 115 flicker 50   # change one or more settings
+brioctl expcomp +10 warmth -5        # relative: add to the current value, clamped to the camera's range
+brioctl fov 78 --dry-run             # print what would change (NAME old -> new), write nothing
+brioctl undo                         # put back what the last changing command replaced
+brioctl expcomp +10 --save           # change it and make it the saved setting (watch keeps it)
 brioctl hdr off                      # hdr and backlight are one control: both names, on/off or 1/0
 brioctl ae manual exposure 150       # manual values need the automatic mode switched off first
 brioctl micgain 0.28                 # input volume of the camera microphone in macOS
@@ -192,6 +197,7 @@ brioctl profiles [--json]            # list the presets and the saved files
 brioctl import optionsplus [DB]      # the settings Logi Options+ saved, as a settings file (--save NAME writes it)
 brioctl defaults                     # camera default values, except mic, showmode and privacy; no restart
 brioctl factory-reset --yes          # restart the MX Brio with factory settings, then restore yours
+brioctl install-skill                # copy the AI agent skill to ~/.claude and ~/.codex
 brioctl watch [FILE]                 # apply now, on connect and on video start (see below)
 brioctl dump                         # all units and registers of the camera, read-only
 brioctl snapshot [FILE]              # every register brioctl reads, serial number masked
@@ -208,6 +214,40 @@ A settings file is plain text: one `name value` per line, and `#` starts a comme
 `# camera VID:PID SERIAL`. `apply` prints a warning when the file was saved from another model and still applies the
 settings that fit; `watch` does not apply such a file at all. The line holds the camera's serial number, so remove it
 before you post the file.
+
+### Relative values, dry run, undo
+
+A value that starts with `+` or `-` changes a number by that much: `brioctl expcomp +10 warmth -5 zoom +25` reads the
+current values, adds, clamps to the camera's minimum and maximum and writes the result like any other value. It can be
+mixed with absolute values in one command. It works on numeric controls only (not `hdr`, `flicker`, `ae` and the other
+controls that take names): a `+` or `-` there writes nothing and the command exits with status 2. The pan, tilt, roll,
+brightness and hue controls take negative numbers, so `pan -10` stays the absolute value -10 there; write `pan +-5` to
+subtract 5.
+`fov +` and `fov -` step to the next wider (65, 78, 90) or narrower (90, 78, 65) angle and stop at the end. A settings
+file cannot hold a relative value.
+
+`--dry-run` (before or after the command) prints the changes a command would make and writes nothing, to the camera or
+to the undo file. It works for setting values, `apply`, `defaults` and `undo`:
+
+```
+$ brioctl expcomp +10 warmth 62 --dry-run
+expcomp 128 -> 138
+warmth 62 unchanged
+$ brioctl expcomp +10 --dry-run --json
+{"changes":[{"name":"expcomp","from":"128","to":"138","unchanged":false}]}
+```
+
+Every value is checked as for a real write, so a refused value is still an error. Each line is compared with the camera
+as it is now, so a file or `undo` that sets one control twice shows both lines against the current value.
+
+Before a command writes, it keeps the old values of the controls that are about to change in `~/.config/brioctl/undo`,
+a settings file with the time and the command in its first line. This covers setting values, `apply`, `defaults` and the
+restore after `factory-reset`; `watch` does not touch it. `brioctl undo` applies that file and replaces it with the
+values it just replaced, so a second `undo` redoes the change. Only the last command is kept, and only what really
+changed. `brioctl undo --dry-run` shows what it would do.
+
+`--save` after a successful set, `apply`, `defaults` or `undo` runs `brioctl save` (the default file), so a change
+persists for [`watch`](#apply-settings-automatically).
 
 ## Capture and describe
 
@@ -285,7 +325,17 @@ with no MCP server: `brioctl --json` and `brioctl describe --json` to read, `bri
 capture --json` to measure the picture. [docs/agents.md](docs/agents.md) describes the read, act, verify loop, what each
 control does, how to read the capture numbers and what an agent must not touch. For Claude Code and Codex,
 [skills/brioctl/SKILL.md](skills/brioctl/SKILL.md) is a compact skill that can be copied to `~/.claude/skills/brioctl/`
-or `~/.codex/skills/brioctl/`.
+or `~/.codex/skills/brioctl/`. `brioctl install-skill` does the copy:
+
+```sh
+brioctl install-skill               # ~/.claude/skills/brioctl and ~/.codex/skills/brioctl, where they exist
+brioctl install-skill --claude      # only Claude Code (creates ~/.claude if needed); --codex likewise, --all both
+brioctl install-skill --uninstall   # remove it again
+```
+
+It copies the file (no link) from `skills/brioctl/SKILL.md` next to the binary, else from `../share/brioctl/skills/`
+`brioctl/SKILL.md` (where Homebrew and `make install` put it), else from the text built into the binary. It reports what
+it did for each tool and needs no camera. Run it again after an update to refresh the copy.
 
 ## Supported cameras
 
@@ -654,6 +704,9 @@ one with experimental support. It never takes a camera brioctl does not know, so
 is unplugged does not apply MX Brio settings to some other webcam. To follow any other camera, give its serial number:
 `brioctl --camera SERIAL watch` (the app puts this into its agent when it is needed; the index from `list` changes when
 cameras come and go).
+
+Settings you change by hand are not saved: `watch` puts the saved file back on the next video start, which reverts them.
+Add `--save` to the change (`brioctl expcomp +10 --save`) or run `brioctl save` afterwards to keep it.
 
 What `watch` does:
 

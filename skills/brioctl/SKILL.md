@@ -17,6 +17,10 @@ names, ranges, defaults, settle times and risky controls. Use only controls it l
 3. Act: `brioctl NAME VALUE [NAME VALUE ...]`, e.g. `brioctl hdr on expcomp 135`.
 4. Wait for the camera to settle, then check: `brioctl get NAME` and `brioctl capture --json` again.
 
+Relative values skip the read: `brioctl expcomp +10 warmth -5` (numbers only, clamped to the range; `pan +-5` to subtract
+on a signed control, `fov +` / `fov -` for the next wider / narrower angle). Preview with `--dry-run` (`--json` gives
+`{"changes":[{"name","from","to","unchanged"}]}`); put back the last change with `brioctl undo`.
+
 Change one or two things at a time. Always use `--json` when parsing. With several cameras pass `--camera ID`
 (`brioctl list --json`). Check the exit status: 1 error, 2 camera not chosen or bad command line, 3 capture permission
 denied (tell the user to allow the terminal in System Settings, Privacy & Security, Camera). Errors are plain text on
@@ -72,8 +76,8 @@ Everything else: 0.3 s. `mic` also restarts the camera about 2 s after a change.
 
 `brioctl save NAME` / `brioctl apply NAME` store and restore settings (`brioctl profiles --json` lists files and
 presets). A `watch` LaunchAgent puts `~/.config/brioctl/settings` back on connect and video start and undoes unsaved
-changes, so run `brioctl save` after a change the user wants to keep (ask before overwriting their file), or point them
-to "Remember current settings" in the menu bar app.
+changes, so add `--save` to a change the user wants to keep (`brioctl expcomp +10 --save`; ask before overwriting their
+file), or point them to "Remember current settings" in the menu bar app. `brioctl install-skill` installs this skill.
 
 ## Do not
 
