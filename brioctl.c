@@ -27,6 +27,7 @@
 #include <IOKit/hid/IOHIDManager.h>
 #include <IOKit/hid/IOHIDKeys.h>
 #include <IOKit/usb/IOUSBLib.h>
+#include "capture.h"
 
 #define VID_LOGITECH 0x046d
 #define PID_MXBRIO 0x0944
@@ -2304,6 +2305,293 @@ static int snapshot(Cam *c, const char *path) {
     return 0;
 }
 
+// --- describe: what each control means, for programs that decide which one to change -----------------------------------
+// Only what the README, the help text or docs/registers.md already say. settle is the time to wait after a write before
+// a new picture shows it: 1 s for exposure and white balance, 3.5 s for zoom and pan on the MX Brio (they glide to the
+// new value in about 3 s), 0.3 s for the rest.
+static const struct {
+    const char *name, *unit, *meaning, *effect;
+    int settle10;  // seconds x 10; 0 = the default
+    const char *risk;
+} DESC[] = {
+    {"fov", "degrees", "field of view: 90, 78 or 65 degrees, a digital crop",
+     "90 shows the room, 65 shows the face", 0, NULL},
+    {"showmode", NULL, "Show Mode: the camera switches to a desk view when it is tilted down to the desk",
+     "while the camera is tilted to the desk it sets field of view and zoom itself", 0, NULL},
+    {"hdr", NULL, "HDR switch (the UVC backlight compensation)", "lifts the shadows; use when a bright window is behind you",
+     10, NULL},
+    {"warmth", NULL, "white balance warmth, 50 = neutral, higher = warmer",
+     "higher shifts the picture towards warm, lower towards blue", 10, NULL},
+    {"tint", NULL, "tint, 50 = neutral", NULL, 10, NULL},
+    {"vibrance", NULL, "vibrance, 128 = neutral", NULL, 0, NULL},
+    {"expcomp", NULL, "exposure compensation, 128 = neutral", "raises mid-tone brightness", 10, NULL},
+    {"mic", NULL, "camera microphone on or off", NULL, 0,
+     "the camera restarts about 2 seconds after a change, which cuts the video"},
+    {"zoom", "percent of 1x", "digital zoom, 100 = 1x", "higher values show a smaller part of the scene", 35, NULL},
+    {"pan", "degrees", "moves the zoomed frame sideways", NULL, 35, NULL},
+    {"tilt", "degrees", "moves the zoomed frame up and down", NULL, 0, NULL},
+    {"roll", "degrees", "rotates the picture", NULL, 0, NULL},
+    {"priority", NULL, "what to keep in low light: the frame rate (fps) or the exposure time (exposure)", NULL, 10, NULL},
+    {"ae", NULL, "auto exposure mode; exposure and gain can be written only in manual", NULL, 10, NULL},
+    {"exposure", "100 microseconds", "exposure time (ae manual)", NULL, 10, NULL},
+    {"iris", "f-number x 100", "iris", NULL, 10, NULL},
+    {"gain", NULL, "sensor gain", NULL, 10, NULL},
+    {"backlight", NULL, "backlight compensation (the same control as hdr on cameras without an HDR switch)",
+     "lifts the shadows", 10, NULL},
+    {"flicker", "Hz", "anti-flicker: the frequency of the mains power", NULL, 0, NULL},
+    {"brightness", NULL, "brightness", NULL, 0, NULL},
+    {"contrast", NULL, "contrast", NULL, 0, NULL},
+    {"hueauto", NULL, "automatic hue", NULL, 0, NULL},
+    {"hue", NULL, "hue; can be written only with hueauto off", NULL, 0, NULL},
+    {"saturation", NULL, "saturation", NULL, 0, NULL},
+    {"sharpness", NULL, "sharpness", NULL, 0, NULL},
+    {"gamma", NULL, "gamma", NULL, 0, NULL},
+    {"awb", NULL, "automatic white balance", NULL, 10, NULL},
+    {"wb", "kelvin", "white balance temperature; can be written only with awb off", NULL, 10, NULL},
+    {"af", NULL, "autofocus", NULL, 0, NULL},
+    {"focus", NULL, "focus; can be written only with af off", NULL, 0, NULL},
+    {"privacy", NULL, "privacy shutter", NULL, 0, "may cover the lens, so the picture goes dark"},
+    {"smooth", NULL, "zoom and pan glide to a new value in about 3 seconds when on", NULL, 0, NULL},
+};
+
+static int descIndex(const char *name) {
+    for (size_t i = 0; i < sizeof DESC / sizeof *DESC; i++)
+        if (!strcmp(DESC[i].name, name)) return (int)i;
+    return -1;
+}
+
+static double settleOf(const Cam *c, const Ctrl *k) {
+    int i = descIndex(k->name), s = i >= 0 ? DESC[i].settle10 : 0;
+    if (s == 35 && !(c->feat & F_FULL)) s = 0;  // the glide is an MX Brio feature
+    return s ? s / 10.0 : 0.3;
+}
+
+static int describeCmd(Cam *c, int json) {
+    int rc = 0, first = 1;
+    const char *group = NULL;
+    const CamInfo *ci = &c->info;
+    if (json) {
+        printf("{\"camera\":{\"model\":");
+        jstr(ci->model);
+        printf(",\"name\":");
+        jstr(ci->name[0] ? ci->name : NULL);
+        printf(",\"vid\":\"%04x\",\"pid\":\"%04x\",\"support\":\"%s\"},\"controls\":[", ci->vid, ci->pid,
+               SUPPORT[ci->support]);
+    } else printf("%s\n", camName(ci));
+    for (int i = 0; i < NCTRLS; i++) {
+        const Ctrl *k = &CTRLS[i];
+        if (!k->name) { group = k->group; continue; }
+        if (!avail(c, k)) continue;
+        char cs[16], ds[16], help[192], lo[16] = "", hi[16] = "", st[16] = "";
+        int autoNow, info = getInfo(c, k), di = descIndex(k->name);
+        if (readCtrl(c, k, cs, ds, &autoNow)) rc = 1;
+        helpText(c, k, help, sizeof help);
+        const char *meaning = di >= 0 ? DESC[di].meaning : help, *effect = di >= 0 ? DESC[di].effect : NULL;
+        const char *unit = di >= 0 ? DESC[di].unit : NULL, *risk = di >= 0 ? DESC[di].risk : NULL;
+        int writable = info >= 0 && (info & INFO_SET) && !(info & INFO_AUTO);
+        if (!k->map) {
+            Range r;
+            getRange(c, k, &r);
+            if (r.hasMin) formatValue(k, r.min, lo, sizeof lo);
+            if (r.hasMax) formatValue(k, r.max, hi, sizeof hi);
+            if (r.hasRes) formatValue(k, r.res, st, sizeof st);
+        }
+        if (!json) {
+            printf("\n%s  %s  now %s, default %s%s\n  %s\n", k->name, group ? group : "", cs[0] ? cs : "?",
+                   ds[0] ? ds : "?", autoNow ? " (set automatically now)" : "", meaning);
+            if (lo[0] && hi[0]) printf("  range %s to %s%s%s%s%s\n", lo, hi, st[0] ? ", step " : "", st,
+                                       unit ? " " : "", unit ? unit : "");
+            if (k->map) {
+                const Map *ch[MAP_MAX];
+                int n = choicesOf(c, k, ch, 1);
+                printf("  values");
+                for (int j = 0; j < n; j++) printf(" %s", ch[j]->name);
+                printf("\n");
+            }
+            if (effect) printf("  effect: %s\n", effect);
+            printf("  settle %.1f s%s%s\n", settleOf(c, k), risk ? ", RISKY: " : "", risk ? risk : "");
+            if (!writable) printf("  read-only right now\n");
+            continue;
+        }
+        printf("%s{\"name\":\"%s\",\"group\":", first ? "" : ",", k->name);
+        first = 0;
+        jstr(group);
+        printf(",\"kind\":\"%s\",\"unit\":", !k->map ? "number" : k->map == ON_OFF ? "bool" : "choice");
+        jstr(unit);
+        printf(",\"min\":%s,\"max\":%s,\"step\":%s", lo[0] ? lo : "null", hi[0] ? hi : "null", st[0] ? st : "null");
+        printf(",\"choices\":");
+        if (k->map == ON_OFF) printf("[\"on\",\"off\"]");
+        else if (k->map) {
+            const Map *ch[MAP_MAX];
+            int n = choicesOf(c, k, ch, 1);
+            printf("[");
+            for (int j = 0; j < n; j++) {
+                if (j) putchar(',');
+                jstr(ch[j]->name);
+            }
+            printf("]");
+        } else printf("null");
+        printf(",\"default\":");
+        jvalue(k, ds);
+        printf(",\"current\":");
+        jvalue(k, cs);
+        printf(",\"auto\":%s,\"writable\":%s,\"meaning\":", autoNow ? "true" : "false", writable ? "true" : "false");
+        jstr(meaning);
+        printf(",\"effect_on_image\":");
+        jstr(effect);
+        printf(",\"settle_seconds\":%.1f,\"risky\":%s,\"risk\":", settleOf(c, k), risk ? "true" : "false");
+        jstr(risk);
+        printf("}");
+    }
+    Float32 g;
+    if ((c->feat & F_FULL) && !micRead(&g)) {  // not a camera register: the macOS input volume of the microphone
+        if (json) {
+            printf("%s{\"name\":\"micgain\",\"group\":\"Microphone (macOS)\",\"kind\":\"number\",\"unit\":null,"
+                   "\"min\":0,\"max\":1,\"step\":null,\"choices\":null,\"default\":null,\"current\":%.4f,"
+                   "\"auto\":false,\"writable\":true,\"meaning\":\"input volume of the camera microphone in macOS\","
+                   "\"effect_on_image\":null,\"settle_seconds\":0.3,\"risky\":false,\"risk\":null}",
+                   first ? "" : ",", g);
+        } else printf("\nmicgain  Microphone (macOS)  now %.4f\n  input volume of the camera microphone in macOS\n"
+                      "  range 0 to 1\n  settle 0.3 s\n", g);
+    }
+    if (json) printf("]}\n");
+    return rc;
+}
+
+// --- capture: frames as JPEG, with statistics (the AVFoundation part is capture.m) -------------------------------------
+
+static void statsText(const struct capture_stats *s, const char *in) {
+    printf("%s%-16s%d\n%s%-16s%d\n", in, "width", s->width, in, "height", s->height);
+    printf("%s%-16s%.2f\n%s%-16s%.0f\n%s%-16s%.0f\n%s%-16s%.2f\n", in, "y_mean", s->y_mean, in, "y_p5", s->y_p5, in,
+           "y_p95", s->y_p95, in, "y_stddev", s->y_stddev);
+    printf("%s%-16s%.2f\n%s%-16s%.2f\n%s%-16s%.4f\n", in, "clip_low_pct", s->clip_low_pct, in, "clip_high_pct",
+           s->clip_high_pct, in, "saturation_mean", s->saturation_mean);
+    printf("%s%-16sr %.2f  g %.2f  b %.2f\n", in, "rgb_mean", s->r_mean, s->g_mean, s->b_mean);
+    if (s->wb_bias >= 0) printf("%s%-16s%.4f\n", in, "wb_bias", s->wb_bias);
+    else printf("%s%-16sn/a (no blue)\n", in, "wb_bias");
+    printf("%s%-16s%.2f\n", in, "sharpness", s->sharpness);
+}
+
+static void statsJson(const struct capture_stats *s) {
+    printf("{\"width\":%d,\"height\":%d,\"y_mean\":%.3f,\"y_p5\":%.0f,\"y_p95\":%.0f,\"y_stddev\":%.3f,"
+           "\"clip_low_pct\":%.3f,\"clip_high_pct\":%.3f,\"saturation_mean\":%.4f,"
+           "\"rgb_mean\":{\"r\":%.3f,\"g\":%.3f,\"b\":%.3f},\"wb_bias\":",
+           s->width, s->height, s->y_mean, s->y_p5, s->y_p95, s->y_stddev, s->clip_low_pct, s->clip_high_pct,
+           s->saturation_mean, s->r_mean, s->g_mean, s->b_mean);
+    if (s->wb_bias >= 0) printf("%.4f", s->wb_bias);
+    else printf("null");
+    printf(",\"sharpness\":%.3f}", s->sharpness);
+}
+
+static void statsAverage(const struct capture_stats *f, int n, struct capture_stats *a) {
+    memset(a, 0, sizeof *a);
+    a->width = f[0].width;
+    a->height = f[0].height;
+    double *dst[] = {&a->y_mean, &a->y_p5, &a->y_p95, &a->y_stddev, &a->clip_low_pct, &a->clip_high_pct,
+                     &a->saturation_mean, &a->r_mean, &a->g_mean, &a->b_mean, &a->sharpness};
+    for (int i = 0; i < n; i++) {
+        const double src[] = {f[i].y_mean, f[i].y_p5, f[i].y_p95, f[i].y_stddev, f[i].clip_low_pct,
+                              f[i].clip_high_pct, f[i].saturation_mean, f[i].r_mean, f[i].g_mean, f[i].b_mean,
+                              f[i].sharpness};
+        for (size_t j = 0; j < sizeof src / sizeof *src; j++) *dst[j] += src[j] / n;
+    }
+    a->wb_bias = a->b_mean > 0 ? a->r_mean / a->b_mean : -1;
+}
+
+static int captureUsage(void) {
+    fprintf(stderr, "usage: brioctl capture [-o PATH] [--count N] [--interval SEC] [--wait SEC] [--size WxH] "
+                    "[--stats] [--json]\n");
+    return 2;
+}
+
+// A non-negative decimal number, no exponent or text after it.
+static int parseSeconds(const char *s, double *out) {
+    char *end;
+    if (!*s || strspn(s, "0123456789.") != strlen(s)) return -1;
+    *out = strtod(s, &end);
+    return *end || *out > 3600 ? -1 : 0;
+}
+
+static int captureCmd(int argc, char **argv, const char *camId) {
+    struct capture_opts o = {.path = "capture.jpg", .count = 1, .interval = 1, .wait = 1.0};
+    int stats = 0, json = 0;
+    for (int i = 2; i < argc; i++) {
+        const char *a = argv[i], *v = i + 1 < argc ? argv[i + 1] : NULL;
+        if (!strcmp(a, "--stats")) stats = 1;
+        else if (!strcmp(a, "--json")) json = 1;
+        else if (!v) return captureUsage();
+        else if (!strcmp(a, "-o") || !strcmp(a, "--output")) o.path = argv[++i];
+        else if (!strcmp(a, "--count")) {
+            char *end;
+            long n = strtol(v, &end, 10);
+            if (!*v || *end || n < 1 || n > CAPTURE_MAX_FRAMES) {
+                fprintf(stderr, "--count takes a number from 1 to %d\n", CAPTURE_MAX_FRAMES);
+                return 2;
+            }
+            o.count = (int)n;
+            i++;
+        } else if (!strcmp(a, "--interval") || !strcmp(a, "--wait")) {
+            double *d = a[2] == 'i' ? &o.interval : &o.wait;
+            if (parseSeconds(v, d)) {
+                fprintf(stderr, "%s takes a number of seconds (0 to 3600)\n", a);
+                return 2;
+            }
+            i++;
+        } else if (!strcmp(a, "--size")) {
+            int w, h, used = 0;
+            if (sscanf(v, "%dx%d%n", &w, &h, &used) != 2 || v[used] || w < 1 || h < 1 || w > 16384 || h > 16384) {
+                fprintf(stderr, "--size takes WIDTHxHEIGHT, for example 1280x720\n");
+                return 2;
+            }
+            o.width = w;
+            o.height = h;
+            i++;
+        } else return captureUsage();
+    }
+    if (!*o.path) return captureUsage();
+    int rc = selectCamera(camId);
+    if (rc) return rc;
+    o.vid = target.vid;
+    o.pid = target.pid;
+    o.loc = target.loc;
+    static struct capture_result r;  // large: about 100 KB
+    rc = brioctl_capture(&o, &r);
+    if (rc) fprintf(stderr, "%s\n", r.error);
+    if (r.n == 0) return rc;
+    if (json) {
+        struct capture_stats avg;
+        statsAverage(r.stats, r.n, &avg);
+        printf("{\"files\":[");
+        for (int i = 0; i < r.n; i++) {
+            if (i) putchar(',');
+            jstr(r.path[i]);
+        }
+        printf("],\"frames\":[");
+        for (int i = 0; i < r.n; i++) {
+            if (i) putchar(',');
+            statsJson(&r.stats[i]);
+        }
+        printf("],\"avg\":");
+        statsJson(&avg);
+        printf("}\n");
+    } else {
+        for (int i = 0; i < r.n; i++) {
+            printf("%s\n", r.path[i]);
+            if (stats) {
+                if (r.n > 1) printf("frame %d\n", i + 1);
+                statsText(&r.stats[i], "  ");
+            }
+        }
+        if (stats && r.n > 1) {
+            struct capture_stats avg;
+            statsAverage(r.stats, r.n, &avg);
+            printf("average\n");
+            statsText(&avg, "  ");
+        }
+    }
+    return rc;
+}
+
 static void usage(FILE *f) {
     fprintf(f, "usage: brioctl [--camera ID] COMMAND   ID: index or serial from 'brioctl list', or location 0x...\n"
                "       brioctl                     show settings\n"
@@ -2319,6 +2607,9 @@ static void usage(FILE *f) {
                "       brioctl defaults            camera defaults, except mic, showmode and privacy\n"
                "       brioctl watch [FILE]        apply FILE now, when the camera is connected and when video starts\n"
                "       brioctl factory-reset --yes restart the MX Brio with factory settings, then restore yours\n"
+               "       brioctl describe [--json]   what every control means, its range, settle time, risk; read-only\n"
+               "       brioctl capture [-o PATH] [--count N] [--interval SEC] [--wait SEC] [--size WxH] [--stats] [--json]\n"
+               "                                   JPEG frames from the camera (macOS asks for camera access), with picture stats\n"
                "       brioctl dump                list all UVC units and extension controls (read-only)\n"
                "       brioctl snapshot [FILE]     write every register brioctl reads, serial masked (read-only)\n"
                "       brioctl --version           print the version\n");
@@ -2929,6 +3220,7 @@ int main(int argc, char **argv) {
         return !strcmp(cmd, "list") ? listCmd(arg != NULL) : profiles(arg != NULL);
     }
     if (!strcmp(cmd, "import")) return importCmd(argc, argv);  // reads Logi Options+'s file, not a camera
+    if (!strcmp(cmd, "capture")) return captureCmd(argc, argv, camId);  // the only command that uses AVFoundation
     if (!strcmp(cmd, "watch")) return watch(arg ? arg : "settings", camId);
     int rc = 0;
 #ifdef BRIOCTL_FAKE
@@ -2970,9 +3262,10 @@ int main(int argc, char **argv) {
     }
 #endif
     if (!strcmp(cmd, "get") && argc != 3) { usage(stderr); return 2; }
+    if (!strcmp(cmd, "describe") && arg && strcmp(arg, "--json")) { usage(stderr); return 2; }
 
     static const char *const COMMANDS[] = {"show", "dump", "save", "apply", "defaults", "factory-reset", "--json",
-                                           "snapshot", "get"};
+                                           "snapshot", "get", "describe"};
     int isCommand = 0;
     for (size_t i = 0; i < sizeof COMMANDS / sizeof *COMMANDS; i++)
         if (!strcmp(cmd, COMMANDS[i])) isCommand = 1;
@@ -2984,6 +3277,7 @@ int main(int argc, char **argv) {
     if (!strcmp(cmd, "show")) rc = show(&c);
     else if (!strcmp(cmd, "--json")) rc = showJson(&c);
     else if (!strcmp(cmd, "get")) rc = get(&c, arg);
+    else if (!strcmp(cmd, "describe")) rc = describeCmd(&c, arg != NULL);
     else if (!strcmp(cmd, "snapshot")) rc = snapshot(&c, arg);
     else if (!strcmp(cmd, "dump")) rc = dump(&c);
     else if (!strcmp(cmd, "save")) rc = save(&c, arg ? arg : "settings");
