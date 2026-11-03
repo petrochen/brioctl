@@ -8,18 +8,20 @@ LOG = $(HOME)/Library/Logs/brioctl.log
 
 # sqlite3 is the system library: `import optionsplus` reads Logi Options+'s database with it
 LIBS = -framework IOKit -framework CoreFoundation -framework CoreAudio -framework CoreMediaIO -lsqlite3
+# capture.m is the only file that uses AVFoundation (`brioctl capture`); the rest never triggers the camera prompt.
+OBJLIBS = -framework AVFoundation -framework CoreMedia -framework CoreVideo -framework ImageIO -framework CoreGraphics
 DEFS = -DVERSION=\"$(VERSION)\"
 
 # Release build: one binary for Apple Silicon and Intel, runs on macOS 12 and later.
 UNIVERSAL = -arch arm64 -arch x86_64 -mmacosx-version-min=12.0
 DIST = brioctl-$(VERSION)-macos-universal
 
-brioctl: brioctl.c Makefile
-	$(CC) $(CFLAGS) $(DEFS) -o $@ $< $(LIBS)
+brioctl: brioctl.c capture.m capture.h Makefile
+	$(CC) $(CFLAGS) $(DEFS) -fobjc-arc -o $@ brioctl.c capture.m $(LIBS) $(OBJLIBS)
 
 # Offline tests: the same source against a camera read from tests/mxbrio-1.1.394.snap
-tests/brioctl-fake: brioctl.c Makefile
-	$(CC) $(CFLAGS) $(DEFS) -DBRIOCTL_FAKE -o $@ $< $(LIBS)
+tests/brioctl-fake: brioctl.c capture.m capture.h Makefile
+	$(CC) $(CFLAGS) $(DEFS) -DBRIOCTL_FAKE -fobjc-arc -o $@ brioctl.c capture.m $(LIBS) $(OBJLIBS)
 
 # Rewrite the generated camera fixtures (tests/generic-uvc*.snap, tests/brio500-sim.snap) from the MX Brio snapshot.
 fixtures:
@@ -46,7 +48,7 @@ test-app:
 
 # Always rebuilt: it replaces ./brioctl with the universal binary.
 universal:
-	$(CC) $(CFLAGS) $(DEFS) $(UNIVERSAL) -o brioctl brioctl.c $(LIBS)
+	$(CC) $(CFLAGS) $(DEFS) $(UNIVERSAL) -fobjc-arc -o brioctl brioctl.c capture.m $(LIBS) $(OBJLIBS)
 
 # $(DIST).tar.gz with the universal binary, README.md and LICENSE.
 dist: universal
