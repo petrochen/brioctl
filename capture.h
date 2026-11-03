@@ -18,6 +18,10 @@ struct capture_opts {
     int width, height;    // requested size; 0 = the highest resolution up to 1920x1080
     int vid, pid;         // the camera, as brioctl list shows it
     unsigned loc;         // USB location id
+    int no_face;          // 1: skip the face detection (Vision)
+    // Fake build only: the camera's expcomp, warmth and hdr (1 = on), which the synthetic picture follows; the real
+    // build ignores them. have_state 0 = a neutral picture.
+    int have_state, expcomp, warmth, hdr;
 };
 
 // All values are plain numbers of the picture; wb_bias is r_mean / b_mean, negative if blue is zero.
@@ -30,10 +34,20 @@ struct capture_stats {
     double sharpness;                      // variance of a 3x3 Laplacian of Y, picture reduced to at most 640 wide
 };
 
+// The largest face of a frame (VNDetectFaceRectanglesRequest on the picture reduced to at most 640 wide); stats are
+// those of the face box enlarged by 20%. faces = 0: no face (or detection off), everything else is 0.
+struct capture_face {
+    int faces;                // faces found
+    double fraction;          // area of the face box / area of the frame
+    double cx, cy;            // centre of the face box, 0-1 from the top left corner
+    struct capture_stats stats;
+};
+
 struct capture_result {
     int n;
     char path[CAPTURE_MAX_FRAMES][CAPTURE_PATH_MAX];
     struct capture_stats stats[CAPTURE_MAX_FRAMES];
+    struct capture_face face[CAPTURE_MAX_FRAMES];
     char error[256];
 };
 

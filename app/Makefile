@@ -13,7 +13,7 @@ VERSION = 1.1.0
 # ./brioctl of the repository is left alone.
 CFLAGS ?= -Wall -Wextra -Wno-missing-field-initializers -O2
 LIBS = -framework IOKit -framework CoreFoundation -framework CoreAudio -framework CoreMediaIO -lsqlite3 \
-	-framework AVFoundation -framework CoreMedia -framework CoreVideo -framework ImageIO -framework CoreGraphics
+	-framework AVFoundation -framework CoreMedia -framework CoreVideo -framework ImageIO -framework CoreGraphics -framework Vision
 UNIVERSAL = -arch arm64 -arch x86_64 -mmacosx-version-min=12.0
 
 BUILD = build

@@ -2098,7 +2098,7 @@ assert set(d) == {"files", "frames", "avg"} and d["files"] == ["shot.jpg"] and l
 keys = {"width", "height", "y_mean", "y_p5", "y_p95", "y_stddev", "clip_low_pct", "clip_high_pct", "saturation_mean",
         "rgb_mean", "wb_bias", "sharpness"}
 f = d["frames"][0]
-assert set(f) == keys and set(d["avg"]) == keys and set(f["rgb_mean"]) == {"r", "g", "b"}, f
+assert set(f) == keys | {"face"} and set(d["avg"]) == keys | {"face"} and set(f["rgb_mean"]) == {"r", "g", "b"}, f
 assert (f["width"], f["height"]) == (640, 360)
 assert 0 <= f["y_p5"] <= f["y_mean"] <= f["y_p95"] <= 255 and f["y_stddev"] > 0
 assert 0 <= f["clip_low_pct"] <= 100 and 0 <= f["clip_high_pct"] <= 100 and 0 <= f["saturation_mean"] <= 1
@@ -2162,6 +2162,198 @@ t_capture_errors() {
 t_capture_touches_no_register() {
     BRIOCTL_FAKE_TRACE=1 "$BIN" capture --stats > /dev/null 2> trace || return 1
     expect "SET_CUR count" "$(setcurs trace)" 0
+}
+
+# --- capture: face region; auto ------------------------------------------------------------------------------------------
+
+t_capture_face() {
+    python3 -I -c pass >/dev/null 2>&1 || { echo "# python3 not available"; return 77; }
+    "$BIN" capture --count 2 --interval 0 --wait 0 -o f.jpg --json > out.json || return 1
+    python3 -I - out.json <<'PY' || return 1
+import json, sys
+d = json.load(open(sys.argv[1]))
+keys = {"y_mean", "y_p5", "y_p95", "y_stddev", "clip_low_pct", "clip_high_pct", "saturation_mean", "rgb_mean",
+        "wb_bias", "sharpness"}
+for f in d["frames"] + [d["avg"]]:
+    face = f["face"]
+    assert set(face) == keys | {"faces", "face_fraction", "face_center"}, face
+    assert face["faces"] == 1 and abs(face["face_fraction"] - 0.08) < 0.001, face
+    assert set(face["face_center"]) == {"x", "y"} and all(0 <= v <= 1 for v in face["face_center"].values())
+    assert face["y_mean"] != f["y_mean"] and 0 <= face["y_p5"] <= face["y_mean"] <= face["y_p95"] <= 255
+PY
+    out=$("$BIN" capture --stats 2>&1)
+    has "face block" "$out" "face_fraction" || return 1
+    has "face block" "$out" "faces" || return 1
+    "$BIN" capture --json --no-face > out.json || return 1
+    python3 -I -c 'import json; d = json.load(open("out.json")); assert d["frames"][0]["face"] is None and d["avg"]["face"] is None' || return 1
+    BRIOCTL_FAKE_CAPTURE_NOFACE=1 "$BIN" capture --json > out.json || return 1
+    python3 -I -c 'import json; d = json.load(open("out.json")); assert d["frames"][0]["face"] is None and d["avg"]["face"] is None' || return 1
+    out=$(BRIOCTL_FAKE_CAPTURE_NOFACE=1 "$BIN" capture --stats 2>&1)
+    has "no face" "$out" "face            none" || return 1
+    hasnt "--no-face text" "$("$BIN" capture --stats --no-face 2>&1)" "face_fraction"
+}
+
+# autoj ARGS...: run brioctl auto --json ARGS into auto.json
+autoj() { "$BIN" auto --json "$@" > auto.json 2> auto.err; }
+
+t_auto_converges_and_undoes() {
+    python3 -I -c pass >/dev/null 2>&1 || { echo "# python3 not available"; return 77; }
+    expect "start expcomp" "$("$BIN" get expcomp)" 128 || return 1
+    expect "start warmth" "$("$BIN" get warmth)" 62 || return 1
+    autoj; rc=$?
+    expect "status" "$rc" 0 || return 1
+    expect "stderr" "$(cat auto.err)" "" || return 1
+    python3 -I - auto.json <<'PY' || return 1
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert set(d) == {"target", "dry_run", "steps", "before", "after", "applied", "recommendations", "note", "saved",
+                  "stopped"}, sorted(d)
+assert d["target"] == "face" and d["dry_run"] is False and d["stopped"] == "in_range" and d["note"] is None
+assert 1 <= len(d["steps"]) <= 4
+s = d["steps"][0]
+assert s["step"] == 1 and s["stats"]["judged"] == "face" and s["stats"]["y_mean"] < 105 and s["stats"]["wb_bias"] > 1.12
+names = [c["name"] for c in s["changes"]]
+assert names == ["expcomp", "warmth"], names
+c = s["changes"][0]
+assert set(c) == {"name", "from", "to", "why"} and c["from"] == "128" and c["to"] == "140"
+assert s["changes"][1]["from"] == "62" and s["changes"][1]["to"] == "56"
+b, a = d["before"], d["after"]
+assert b["y_mean"] == s["stats"]["y_mean"] and 105 <= a["y_mean"] <= 140 and 0.90 <= a["wb_bias"] <= 1.12, a
+assert set(d["applied"]) == {"expcomp", "warmth"} and int(d["applied"]["expcomp"]) > 128 and int(d["applied"]["warmth"]) < 62
+assert d["recommendations"] == []
+PY
+    [ "$("$BIN" get expcomp)" -gt 128 ] && [ "$("$BIN" get warmth)" -lt 62 ] || { echo "# nothing was written"; return 1; }
+    expect "fov" "$("$BIN" get fov)" 78 || return 1
+    expect "zoom" "$("$BIN" get zoom)" 115 || return 1
+    expect "hdr" "$("$BIN" get hdr)" on || return 1
+    # one undo entry for the whole run: each control once, with its value from before the run
+    expect "undo lines" "$(grep -vc '^#' home/.config/brioctl/undo)" 2 || return 1
+    has "undo expcomp" "$(cat home/.config/brioctl/undo)" "expcomp 128" || return 1
+    has "undo warmth" "$(cat home/.config/brioctl/undo)" "warmth 62" || return 1
+    "$BIN" undo > /dev/null || return 1
+    expect "undone expcomp" "$("$BIN" get expcomp)" 128 || return 1
+    expect "undone warmth" "$("$BIN" get warmth)" 62
+}
+
+t_auto_dry_run() {
+    python3 -I -c pass >/dev/null 2>&1 || { echo "# python3 not available"; return 77; }
+    BRIOCTL_FAKE_TRACE=1 "$BIN" auto --dry-run --json > auto.json 2> trace; rc=$?
+    expect "status" "$rc" 0 || return 1
+    expect "SET_CUR count" "$(setcurs trace)" 0 || return 1
+    [ ! -e home/.config/brioctl/undo ] || { echo "# a dry run wrote the undo file"; return 1; }
+    expect "expcomp" "$("$BIN" get expcomp)" 128 || return 1
+    python3 -I - auto.json <<'PY' || return 1
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["dry_run"] is True and d["stopped"] == "dry_run" and d["after"] is None and d["applied"] == {}
+assert len(d["steps"]) == 1 and [c["name"] for c in d["steps"][0]["changes"]] == ["expcomp", "warmth"]
+PY
+    out=$("$BIN" auto --dry-run 2>&1)
+    has "text plan" "$out" "expcomp 128 -> 140" || return 1
+    has "text plan" "$out" "warmth 62 -> 56" || return 1
+    has "text stop" "$out" "stopped: dry_run" || return 1
+    "$BIN" auto --dry-run --save > out 2>&1; rc=$?
+    expect "--dry-run --save" "$rc" 2
+}
+
+t_auto_max_steps() {
+    python3 -I -c pass >/dev/null 2>&1 || { echo "# python3 not available"; return 77; }
+    BRIOCTL_FAKE_TRACE=1 "$BIN" auto --json --max-steps 1 > auto.json 2> trace; rc=$?
+    expect "status" "$rc" 0 || return 1
+    expect "SET_CUR count" "$(setcurs trace)" 2 || return 1
+    python3 -I - auto.json <<'PY' || return 1
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert len(d["steps"]) == 1 and d["stopped"] == "max_steps", d["stopped"]
+assert d["applied"] == {"expcomp": "140", "warmth": "56"}, d["applied"]
+assert d["after"]["y_mean"] > d["before"]["y_mean"] and d["after"]["wb_bias"] < d["before"]["wb_bias"]
+PY
+    for bad in "--max-steps 0" "--max-steps 11" "--max-steps x" "--max-steps" "--target eyes" "--wait -1" "--bogus"; do
+        "$BIN" auto $bad > out 2>&1; rc=$?
+        expect "auto $bad status" "$rc" 2 || return 1
+    done
+    expect "expcomp" "$("$BIN" get expcomp)" 140
+}
+
+t_auto_without_a_face() {
+    python3 -I -c pass >/dev/null 2>&1 || { echo "# python3 not available"; return 77; }
+    BRIOCTL_FAKE_CAPTURE_NOFACE=1 "$BIN" auto --json > auto.json || return 1
+    python3 -I - auto.json <<'PY' || return 1
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert "no face" in d["note"] and d["before"]["judged"] == "frame" and "face_fraction" not in d["before"], d["note"]
+assert d["steps"][0]["stats"]["judged"] == "frame"
+PY
+    out=$(BRIOCTL_FAKE_CAPTURE_NOFACE=1 "$BIN" auto --dry-run 2>&1)
+    has "text note" "$out" "no face found" || return 1
+    "$BIN" auto --target frame --dry-run --json > auto.json || return 1
+    python3 -I -c 'import json; d = json.load(open("auto.json")); assert d["target"] == "frame" and d["before"]["judged"] == "frame"'
+}
+
+t_auto_safety_band() {
+    python3 -I -c pass >/dev/null 2>&1 || { echo "# python3 not available"; return 77; }
+    "$BIN" expcomp 200 > /dev/null || return 1  # outside the band, far too bright: auto comes back to the edge
+    autoj --max-steps 1 || return 1
+    expect "bright expcomp" "$("$BIN" get expcomp)" 176 || return 1
+    "$BIN" expcomp 40 warmth 50 > /dev/null || return 1  # outside the band and too dark: up to the edge, not further
+    autoj --max-steps 1 || return 1
+    expect "dark expcomp" "$("$BIN" get expcomp)" 96 || return 1
+    "$BIN" expcomp 140 warmth 20 > /dev/null || return 1  # warmth below the band and too cool: up to the edge
+    autoj --max-steps 1 || return 1
+    expect "cool warmth" "$("$BIN" get warmth)" 30 || return 1
+    # at the limit and still wrong: no write, a note instead
+    "$BIN" expcomp 176 > /dev/null || return 1
+    BRIOCTL_FAKE_CAPTURE_BRIGHT=1 autoj --dry-run --max-steps 1 || return 1
+    expect "no write" "$("$BIN" get expcomp)" 176
+}
+
+t_auto_hdr_and_framing() {
+    python3 -I -c pass >/dev/null 2>&1 || { echo "# python3 not available"; return 77; }
+    "$BIN" hdr off expcomp 144 warmth 47 > /dev/null || return 1
+    BRIOCTL_FAKE_CAPTURE_BRIGHT=1 autoj --max-steps 1 || return 1
+    python3 -I - auto.json <<'PY' || return 1
+import json, sys
+d = json.load(open(sys.argv[1]))
+s = d["steps"][0]
+assert s["stats"]["frame_clip_high_pct"] > 3, s["stats"]
+assert [(c["name"], c["to"]) for c in s["changes"]] == [("hdr", "on")], s["changes"]
+assert d["stopped"] == "in_range" and d["applied"] == {"hdr": "on"}, d
+PY
+    expect "hdr" "$("$BIN" get hdr)" on || return 1
+    # a small face: advice only, unless --framing
+    BRIOCTL_FAKE_CAPTURE_SMALLFACE=1 autoj --dry-run || return 1
+    python3 -I - auto.json <<'PY' || return 1
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert any("fov -" in r and "--framing" in r for r in d["recommendations"]), d["recommendations"]
+assert all(c["name"] not in ("fov", "zoom") for s in d["steps"] for c in s["changes"])
+PY
+    BRIOCTL_FAKE_CAPTURE_SMALLFACE=1 autoj --max-steps 2 || return 1
+    expect "fov untouched" "$("$BIN" get fov)" 78 || return 1
+    expect "zoom untouched" "$("$BIN" get zoom)" 115 || return 1
+    BRIOCTL_FAKE_CAPTURE_SMALLFACE=1 autoj --framing --max-steps 2 || return 1
+    python3 -I - auto.json <<'PY' || return 1
+import json, sys
+d = json.load(open(sys.argv[1]))
+fr = [(c["name"], c["from"], c["to"]) for s in d["steps"] for c in s["changes"] if c["name"] in ("fov", "zoom")]
+assert fr == [("fov", "78", "65"), ("zoom", "115", "140")], fr
+PY
+}
+
+t_auto_save_and_options() {
+    python3 -I -c pass >/dev/null 2>&1 || { echo "# python3 not available"; return 77; }
+    [ ! -e home/.config/brioctl/settings ] || return 1
+    autoj --save --max-steps 1 || return 1
+    [ -s home/.config/brioctl/settings ] || { echo "# --save wrote no settings file"; return 1; }
+    has "saved expcomp" "$(cat home/.config/brioctl/settings)" "expcomp 140" || return 1
+    python3 -I -c 'import json; d = json.load(open("auto.json")); assert d["saved"] is True' || return 1
+    out=$("$BIN" help 2>&1)
+    has "help" "$out" "brioctl auto" || return 1
+    "$BIN" --camera 9 auto --dry-run > out 2>&1; rc=$?
+    expect "unknown camera" "$rc" 2 || return 1
+    out=$(BRIOCTL_FAKE_CAPTURE_DENIED=1 "$BIN" auto 2>&1); rc=$?
+    expect "denied" "$rc" 3 || return 1
+    has "denied message" "$out" "camera access is denied"
 }
 
 # --- relative values, --dry-run, undo, --save, install-skill -----------------------------------------------------------
@@ -2525,6 +2717,14 @@ run "capture: text stats, default file, -N naming, write errors" t_capture_text_
 run "capture --count --size --json" t_capture_json_count_and_size
 run "capture: bad options exit 2, denied access exits 3, unknown camera" t_capture_errors
 run "capture writes no camera register" t_capture_touches_no_register
+run "capture: face region stats, --no-face" t_capture_face
+run "auto: converges, one undo for the whole run" t_auto_converges_and_undoes
+run "auto --dry-run plans one step and writes nothing" t_auto_dry_run
+run "auto --max-steps, bad options" t_auto_max_steps
+run "auto without a face judges the frame" t_auto_without_a_face
+run "auto keeps expcomp 96-176 and warmth 30-70" t_auto_safety_band
+run "auto: hdr for blown highlights, framing only with --framing" t_auto_hdr_and_framing
+run "auto --save, errors" t_auto_save_and_options
 run "relative values: +N and -N add to the current value, clamp, mix with absolute ones" t_relative_values
 run "relative values on named controls exit 2 and write nothing" t_relative_values_on_names_exit_2
 run "fov + and fov - step to the next wider or narrower angle" t_fov_steps

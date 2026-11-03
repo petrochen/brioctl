@@ -9,7 +9,7 @@ LOG = $(HOME)/Library/Logs/brioctl.log
 # sqlite3 is the system library: `import optionsplus` reads Logi Options+'s database with it
 LIBS = -framework IOKit -framework CoreFoundation -framework CoreAudio -framework CoreMediaIO -lsqlite3
 # capture.m is the only file that uses AVFoundation (`brioctl capture`); the rest never triggers the camera prompt.
-OBJLIBS = -framework AVFoundation -framework CoreMedia -framework CoreVideo -framework ImageIO -framework CoreGraphics
+OBJLIBS = -framework AVFoundation -framework CoreMedia -framework CoreVideo -framework ImageIO -framework CoreGraphics -framework Vision
 DEFS = -DVERSION=\"$(VERSION)\"
 # Embedded Info.plist (camera usage string): a host app without its own still gets the permission prompt, not a crash.
 INFOPLIST = -Wl,-sectcreate,__TEXT,__info_plist,brioctl-info.generated.plist

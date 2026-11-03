@@ -6,6 +6,7 @@
 #import <CoreVideo/CoreVideo.h>
 #import <ImageIO/ImageIO.h>
 #import <CoreGraphics/CoreGraphics.h>
+#import <Vision/Vision.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -131,19 +132,96 @@ static int writeJPEG(const uint8_t *bgra, int w, int h, size_t stride, const cha
     return 0;
 }
 
+// --- faces ----------------------------------------------------------------------------------------------------------
+
+// Statistics of the face box (pixels, from the top left) enlarged by 20%.
+static void faceRegion(const uint8_t *bgra, int w, int h, size_t stride, double bx, double by, double bw, double bh,
+                       int faces, struct capture_face *f) {
+    memset(f, 0, sizeof *f);
+    if (faces <= 0 || bw <= 0 || bh <= 0) return;
+    double x0 = bx - 0.1 * bw, y0 = by - 0.1 * bh, x1 = bx + 1.1 * bw, y1 = by + 1.1 * bh;
+    int ix0 = x0 < 0 ? 0 : (int)x0, iy0 = y0 < 0 ? 0 : (int)y0, ix1 = x1 > w ? w : (int)x1, iy1 = y1 > h ? h : (int)y1;
+    if (ix1 - ix0 < 2 || iy1 - iy0 < 2) return;
+    f->faces = faces;
+    f->fraction = bw * bh / ((double)w * h);
+    f->cx = (bx + bw / 2) / w;
+    f->cy = (by + bh / 2) / h;
+    brioctl_picture_stats(bgra + (size_t)iy0 * stride + (size_t)ix0 * 4, ix1 - ix0, iy1 - iy0, stride, &f->stats);
+}
+
+#ifdef BRIOCTL_FAKE
+// The fake picture has one face, always in the same place (BRIOCTL_FAKE_CAPTURE_NOFACE=1: none;
+// BRIOCTL_FAKE_CAPTURE_SMALLFACE=1: a small one, 1% of the frame).
+static void fakeFaceBox(int w, int h, double *bx, double *by, double *bw, double *bh) {
+    if (getenv("BRIOCTL_FAKE_CAPTURE_SMALLFACE")) *bx = w * 9 / 20, *by = h * 9 / 20, *bw = w / 10, *bh = h / 10;
+    else *bx = w * 2 / 5, *by = h * 3 / 10, *bw = w / 5, *bh = h * 2 / 5;
+}
+
+static int findFace(const uint8_t *bgra, int w, int h, size_t stride, double *bx, double *by, double *bw, double *bh) {
+    (void)bgra, (void)stride;  // Vision is never called on the fake picture
+    if (getenv("BRIOCTL_FAKE_CAPTURE_NOFACE")) return 0;
+    fakeFaceBox(w, h, bx, by, bw, bh);
+    return 1;
+}
+#else
+// Vision on the picture reduced to at most 640 wide (nearest pixel: enough to find a face). The largest face, as a
+// box in pixels of the full picture; returns the number of faces.
+static int findFace(const uint8_t *bgra, int w, int h, size_t stride, double *bx, double *by, double *bw, double *bh) {
+    int f = (w + 639) / 640, sw = w / f, sh = h / f;
+    if (sw < 16 || sh < 16) return 0;
+    uint8_t *small = malloc((size_t)sw * sh * 4);
+    if (!small) return 0;
+    for (int y = 0; y < sh; y++)
+        for (int x = 0; x < sw; x++)
+            memcpy(small + ((size_t)y * sw + x) * 4, bgra + (size_t)(y * f + f / 2) * stride + (size_t)(x * f + f / 2) * 4, 4);
+    int n = 0;
+    @autoreleasepool {
+        CVPixelBufferRef pb = NULL;
+        if (CVPixelBufferCreateWithBytes(NULL, sw, sh, kCVPixelFormatType_32BGRA, small, (size_t)sw * 4, NULL, NULL,
+                                         NULL, &pb) == kCVReturnSuccess) {
+            VNDetectFaceRectanglesRequest *req = [[VNDetectFaceRectanglesRequest alloc] init];
+            VNImageRequestHandler *hd = [[VNImageRequestHandler alloc] initWithCVPixelBuffer:pb options:@{}];
+            NSError *e = nil;
+            if ([hd performRequests:@[ req ] error:&e]) {
+                double best = 0;
+                for (VNFaceObservation *o in req.results) {  // normalised, origin at the bottom left
+                    CGRect r = o.boundingBox;
+                    n++;
+                    if (r.size.width * r.size.height > best) {
+                        best = r.size.width * r.size.height;
+                        *bx = r.origin.x * w, *bw = r.size.width * w;
+                        *bh = r.size.height * h, *by = (1 - r.origin.y - r.size.height) * h;
+                    }
+                }
+            }
+            CVPixelBufferRelease(pb);
+        }
+    }
+    free(small);
+    return n;
+}
+#endif
+
 // --- the frames -----------------------------------------------------------------------------------------------------
 
-static int saveFrame(const uint8_t *bgra, int w, int h, size_t stride, struct capture_result *r, const char *path) {
+static int saveFrame(const uint8_t *bgra, int w, int h, size_t stride, struct capture_result *r, const char *path,
+                     const struct capture_opts *o) {
     snprintf(r->path[r->n], CAPTURE_PATH_MAX, "%s", path);
     if (writeJPEG(bgra, w, h, stride, path, r->error, sizeof r->error)) return -1;
     brioctl_picture_stats(bgra, w, h, stride, &r->stats[r->n]);
+    double bx = 0, by = 0, bw = 0, bh = 0;
+    int faces = o->no_face ? 0 : findFace(bgra, w, h, stride, &bx, &by, &bw, &bh);
+    faceRegion(bgra, w, h, stride, bx, by, bw, bh, faces, &r->face[r->n]);
     r->n++;
     return 0;
 }
 
 #ifdef BRIOCTL_FAKE
 
-// A gradient with a bright square, the same every time: red grows to the right, green downwards, blue is 64.
+// A gradient with a bright square and a face (a flat block), the same every time: red grows to the right, green
+// downwards, blue is 64. With o->have_state the picture follows the camera: the face gets brighter by 2% per step of
+// expcomp above 128 (the rest by 0.5%) and redder by 1% per step of warmth above 50 (the rest by 0.3%).
+// BRIOCTL_FAKE_CAPTURE_BRIGHT=1 adds a blown-out window on the right (200 instead of 255 when hdr is on).
 int brioctl_capture(const struct capture_opts *o, struct capture_result *r) {
     memset(r, 0, sizeof *r);
     if (getenv("BRIOCTL_FAKE_CAPTURE_DENIED")) {
@@ -154,20 +232,40 @@ int brioctl_capture(const struct capture_opts *o, struct capture_result *r) {
     size_t stride = (size_t)w * 4;
     uint8_t *px = malloc(stride * h);
     if (!px) { snprintf(r->error, sizeof r->error, "out of memory"); return 1; }
+    double ef = 1, bf = 1, wd = 0;
+    if (o->have_state) {
+        ef = 1 + (o->expcomp - 128) * 0.02, bf = 1 + (o->expcomp - 128) * 0.005, wd = (o->warmth - 50) * 0.01;
+        if (ef < 0.1) ef = 0.1;
+        if (bf < 0.1) bf = 0.1;
+    }
+    int window = getenv("BRIOCTL_FAKE_CAPTURE_BRIGHT") ? (o->have_state && o->hdr ? 200 : 255) : 0;
+    double fx, fy, fw, fh;
+    fakeFaceBox(w, h, &fx, &fy, &fw, &fh);
+#define CLAMP255(v) ((v) > 255 ? 255 : (v) < 0 ? 0 : (uint8_t)(v))
     for (int y = 0; y < h; y++)
         for (int x = 0; x < w; x++) {
             uint8_t *p = px + y * stride + x * 4;
             int sq = x >= w / 8 && x < w / 4 && y >= h / 8 && y < h / 4;
-            p[0] = sq ? 255 : 64;
-            p[1] = sq ? 255 : (uint8_t)(y * 255 / (h > 1 ? h - 1 : 1));
-            p[2] = sq ? 255 : (uint8_t)(x * 255 / (w > 1 ? w - 1 : 1));
+            if (x >= fx && x < fx + fw && y >= fy && y < fy + fh) {
+                p[0] = CLAMP255(88 * ef * (1 - wd));
+                p[1] = CLAMP255(72 * ef);
+                p[2] = CLAMP255(80 * ef * (1 + wd));
+            } else if (sq) {
+                p[0] = p[1] = p[2] = 255;
+            } else if (window && x >= w * 3 / 4) {
+                p[0] = p[1] = p[2] = (uint8_t)window;
+            } else {
+                double b = 64 * bf * (1 - 0.3 * wd), g = (y * 255 / (h > 1 ? h - 1 : 1)) * bf,
+                       rr = (x * 255 / (w > 1 ? w - 1 : 1)) * bf * (1 + 0.3 * wd);
+                p[0] = CLAMP255(b), p[1] = CLAMP255(g), p[2] = CLAMP255(rr);
+            }
             p[3] = 255;
         }
     int rc = 0;
     for (int i = 0; i < o->count && !rc; i++) {  // no waiting: the tests must not sleep
         char name[CAPTURE_PATH_MAX];
         frameName(o->path, i, o->count, name, sizeof name);
-        rc = saveFrame(px, w, h, stride, r, name) ? 1 : 0;
+        rc = saveFrame(px, w, h, stride, r, name, o) ? 1 : 0;
     }
     free(px);
     return rc;
@@ -330,7 +428,7 @@ int brioctl_capture(const struct capture_opts *o, struct capture_result *r) {
             char name[CAPTURE_PATH_MAX];
             frameName(o->path, i, o->count, name, sizeof name);
             rc = saveFrame(CVPixelBufferGetBaseAddress(pb), (int)CVPixelBufferGetWidth(pb),
-                           (int)CVPixelBufferGetHeight(pb), CVPixelBufferGetBytesPerRow(pb), r, name) ? 1 : 0;
+                           (int)CVPixelBufferGetHeight(pb), CVPixelBufferGetBytesPerRow(pb), r, name, o) ? 1 : 0;
             CVPixelBufferUnlockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
             CVPixelBufferRelease(pb);
         }

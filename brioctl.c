@@ -8,6 +8,7 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <math.h>
 #include <stdarg.h>
@@ -1571,6 +1572,8 @@ static char undoCameraLine[96] = "";       // "# camera VID:PID SERIAL"
 
 static void undoRecord(const char *name, const char *value) {
     if (!undoOn || dryRun || undoN >= UNDO_MAX) return;
+    for (int i = 0; i < undoN; i++)  // a run keeps the value from before its first write of a control
+        if (!strcmp(undoName[i], name)) return;
     memmove(undoName + 1, undoName, undoN * sizeof *undoName);
     memmove(undoVal + 1, undoVal, undoN * sizeof *undoVal);
     snprintf(undoName[0], sizeof undoName[0], "%s", name);
@@ -2589,8 +2592,8 @@ static int describeCmd(Cam *c, int json) {
 
 // --- capture: frames as JPEG, with statistics (the AVFoundation part is capture.m) -------------------------------------
 
-static void statsText(const struct capture_stats *s, const char *in) {
-    printf("%s%-16s%d\n%s%-16s%d\n", in, "width", s->width, in, "height", s->height);
+static void statsText(const struct capture_stats *s, const char *in, int dims) {
+    if (dims) printf("%s%-16s%d\n%s%-16s%d\n", in, "width", s->width, in, "height", s->height);
     printf("%s%-16s%.2f\n%s%-16s%.0f\n%s%-16s%.0f\n%s%-16s%.2f\n", in, "y_mean", s->y_mean, in, "y_p5", s->y_p5, in,
            "y_p95", s->y_p95, in, "y_stddev", s->y_stddev);
     printf("%s%-16s%.2f\n%s%-16s%.2f\n%s%-16s%.4f\n", in, "clip_low_pct", s->clip_low_pct, in, "clip_high_pct",
@@ -2601,15 +2604,32 @@ static void statsText(const struct capture_stats *s, const char *in) {
     printf("%s%-16s%.2f\n", in, "sharpness", s->sharpness);
 }
 
-static void statsJson(const struct capture_stats *s) {
-    printf("{\"width\":%d,\"height\":%d,\"y_mean\":%.3f,\"y_p5\":%.0f,\"y_p95\":%.0f,\"y_stddev\":%.3f,"
+// The members of a statistics object without the braces; dims = 0 leaves out width and height (a face box).
+static void statsMembers(const struct capture_stats *s, int dims) {
+    if (dims) printf("\"width\":%d,\"height\":%d,", s->width, s->height);
+    printf("\"y_mean\":%.3f,\"y_p5\":%.0f,\"y_p95\":%.0f,\"y_stddev\":%.3f,"
            "\"clip_low_pct\":%.3f,\"clip_high_pct\":%.3f,\"saturation_mean\":%.4f,"
            "\"rgb_mean\":{\"r\":%.3f,\"g\":%.3f,\"b\":%.3f},\"wb_bias\":",
-           s->width, s->height, s->y_mean, s->y_p5, s->y_p95, s->y_stddev, s->clip_low_pct, s->clip_high_pct,
-           s->saturation_mean, s->r_mean, s->g_mean, s->b_mean);
+           s->y_mean, s->y_p5, s->y_p95, s->y_stddev, s->clip_low_pct, s->clip_high_pct, s->saturation_mean,
+           s->r_mean, s->g_mean, s->b_mean);
     if (s->wb_bias >= 0) printf("%.4f", s->wb_bias);
     else printf("null");
-    printf(",\"sharpness\":%.3f}", s->sharpness);
+    printf(",\"sharpness\":%.3f", s->sharpness);
+}
+
+static void faceJson(const struct capture_face *f) {
+    if (!f || f->faces <= 0) { printf("null"); return; }
+    printf("{\"faces\":%d,\"face_fraction\":%.4f,\"face_center\":{\"x\":%.4f,\"y\":%.4f},", f->faces, f->fraction,
+           f->cx, f->cy);
+    statsMembers(&f->stats, 0);
+    putchar('}');
+}
+
+static void faceText(const struct capture_face *f, const char *in) {
+    if (f->faces <= 0) { printf("%sface            none\n", in); return; }
+    printf("%sface\n%s  %-16s%d\n%s  %-16s%.4f\n%s  %-16sx %.3f  y %.3f\n", in, in, "faces", f->faces, in,
+           "face_fraction", f->fraction, in, "face_center", f->cx, f->cy);
+    statsText(&f->stats, in, 0);
 }
 
 static void statsAverage(const struct capture_stats *f, int n, struct capture_stats *a) {
@@ -2627,9 +2647,27 @@ static void statsAverage(const struct capture_stats *f, int n, struct capture_st
     a->wb_bias = a->b_mean > 0 ? a->r_mean / a->b_mean : -1;
 }
 
+// The average over the frames that have a face (faces = the most seen); faces = 0 if no frame has one.
+static void faceAverage(const struct capture_face *f, int n, struct capture_face *a) {
+    struct capture_stats st[CAPTURE_MAX_FRAMES];
+    int m = 0;
+    memset(a, 0, sizeof *a);
+    for (int i = 0; i < n; i++)
+        if (f[i].faces > 0) {
+            st[m++] = f[i].stats;
+            if (f[i].faces > a->faces) a->faces = f[i].faces;
+            a->fraction += f[i].fraction;
+            a->cx += f[i].cx;
+            a->cy += f[i].cy;
+        }
+    if (!m) return;
+    a->fraction /= m, a->cx /= m, a->cy /= m;
+    statsAverage(st, m, &a->stats);
+}
+
 static int captureUsage(void) {
     fprintf(stderr, "usage: brioctl capture [-o PATH] [--count N] [--interval SEC] [--wait SEC] [--size WxH] "
-                    "[--stats] [--json]\n");
+                    "[--stats] [--json] [--no-face]\n");
     return 2;
 }
 
@@ -2647,6 +2685,7 @@ static int captureCmd(int argc, char **argv, const char *camId) {
     for (int i = 2; i < argc; i++) {
         const char *a = argv[i], *v = i + 1 < argc ? argv[i + 1] : NULL;
         if (!strcmp(a, "--stats")) stats = 1;
+        else if (!strcmp(a, "--no-face")) o.no_face = 1;
         else if (!strcmp(a, "--json")) json = 1;
         else if (!v) return captureUsage();
         else if (!strcmp(a, "-o") || !strcmp(a, "--output")) o.path = argv[++i];
@@ -2698,27 +2737,475 @@ static int captureCmd(int argc, char **argv, const char *camId) {
         printf("],\"frames\":[");
         for (int i = 0; i < r.n; i++) {
             if (i) putchar(',');
-            statsJson(&r.stats[i]);
+            printf("{");
+            statsMembers(&r.stats[i], 1);
+            printf(",\"face\":");
+            faceJson(&r.face[i]);
+            printf("}");
         }
-        printf("],\"avg\":");
-        statsJson(&avg);
-        printf("}\n");
+        struct capture_face favg;
+        faceAverage(r.face, r.n, &favg);
+        printf("],\"avg\":{");
+        statsMembers(&avg, 1);
+        printf(",\"face\":");
+        faceJson(&favg);
+        printf("}}\n");
     } else {
         for (int i = 0; i < r.n; i++) {
             printf("%s\n", r.path[i]);
             if (stats) {
                 if (r.n > 1) printf("frame %d\n", i + 1);
-                statsText(&r.stats[i], "  ");
+                statsText(&r.stats[i], "  ", 1);
+                if (!o.no_face) faceText(&r.face[i], "  ");
             }
         }
         if (stats && r.n > 1) {
             struct capture_stats avg;
             statsAverage(r.stats, r.n, &avg);
             printf("average\n");
-            statsText(&avg, "  ");
+            statsText(&avg, "  ", 1);
+            if (!o.no_face) {
+                struct capture_face favg;
+                faceAverage(r.face, r.n, &favg);
+                faceText(&favg, "  ");
+            }
         }
     }
     return rc;
+}
+
+// --- auto: measure, change a control or two, measure again -----------------------------------------------------------
+// Heuristics only, no model beyond the face box of Vision. Every change goes through set(), so the camera's own checks,
+// undo and --save work as for a hand-typed command. The rules are in AUTO_RULES below, in the order they are tried.
+
+// The numbers of the rules, in one place (docs: README "Automatic adjustment").
+#define AUTO_Y_FACE_LO 105.0     // face y_mean target
+#define AUTO_Y_FACE_HI 140.0
+#define AUTO_Y_FRAME_LO 90.0     // frame y_mean target (--target frame, or no face found)
+#define AUTO_Y_FRAME_HI 140.0
+#define AUTO_EXP_STEP 12         // expcomp per step
+#define AUTO_EXP_SHADOW_STEP 8   // expcomp when the shadows are clipped
+#define AUTO_EXP_MIN 96          // safety band: auto never writes outside it
+#define AUTO_EXP_MAX 176
+#define AUTO_CLIP_HIGH_FRAME 3.0 // % of the frame above Y 235 that asks for hdr
+#define AUTO_CLIP_LOW 5.0        // % of the judged area below Y 16 that asks for light
+#define AUTO_WB_HI 1.12          // r/b above this is too warm
+#define AUTO_WB_LO 0.90          // and below this too cool
+#define AUTO_WARMTH_STEP 6
+#define AUTO_WARMTH_MIN 30       // safety band
+#define AUTO_WARMTH_MAX 70
+#define AUTO_KELVIN_STEP 300     // wb when awb is off
+#define AUTO_FACE_SMALL 0.04     // face_fraction below this: suggest framing
+#define AUTO_ZOOM_STEP 25
+#define AUTO_SHARP_DROP 0.5      // sharpness below this share of the first frame: note about focus
+#define AUTO_MAX_STEPS_LIMIT 10
+
+typedef struct {  // what one capture says
+    struct capture_stats ev, frame;  // ev: the face box (face = 1) or the whole frame
+    int face;
+    double fraction, cx, cy;
+} AutoShot;
+
+typedef struct {
+    AutoShot s;
+    int step, framing;
+    double firstSharp;  // sharpness of the whole frame in the first capture
+    int hasExp, hasWarmth, hasHdr, hasAwb, hasFov, hasZoom, hasWb;
+    long exp, warmth, wb, zoom;
+    char hdr[16], awb[16], fov[16];
+} AutoCtx;
+
+typedef struct { char name[16], arg[16], from[16], to[16], why[96]; } AutoChange;
+typedef struct {
+    AutoChange ch[8];
+    int n, nrec;
+    char rec[6][200];
+} AutoPlan;
+
+static int planHas(const AutoPlan *p, const char *name) {
+    for (int i = 0; i < p->n; i++)
+        if (!strcmp(p->ch[i].name, name)) return 1;
+    return 0;
+}
+
+static void planChange(AutoPlan *p, const char *name, const char *arg, const char *from, const char *to,
+                       const char *fmt, ...) {
+    if (p->n >= 8 || planHas(p, name)) return;
+    AutoChange *c = &p->ch[p->n++];
+    snprintf(c->name, sizeof c->name, "%s", name);
+    snprintf(c->arg, sizeof c->arg, "%s", arg);
+    snprintf(c->from, sizeof c->from, "%s", from);
+    snprintf(c->to, sizeof c->to, "%s", to);
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(c->why, sizeof c->why, fmt, ap);
+    va_end(ap);
+}
+
+static void planRec(AutoPlan *p, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    if (p->nrec < 6) vsnprintf(p->rec[p->nrec++], sizeof p->rec[0], fmt, ap);
+    va_end(ap);
+}
+
+// cur moved by delta, kept in lo..hi; a value already outside the band is never moved further out.
+static long bandStep(long cur, long delta, long lo, long hi) {
+    long v = cur + delta;
+    v = v < lo ? lo : v > hi ? hi : v;
+    return (delta > 0 && v <= cur) || (delta < 0 && v >= cur) ? cur : v;
+}
+
+static void ruleExposure(const AutoCtx *x, AutoPlan *p) {
+    double lo = x->s.face ? AUTO_Y_FACE_LO : AUTO_Y_FRAME_LO, hi = x->s.face ? AUTO_Y_FACE_HI : AUTO_Y_FRAME_HI;
+    double y = x->s.ev.y_mean;
+    if (!x->hasExp || (y >= lo && y <= hi)) return;
+    long delta = y < lo ? AUTO_EXP_STEP : -AUTO_EXP_STEP, to = bandStep(x->exp, delta, AUTO_EXP_MIN, AUTO_EXP_MAX);
+    if (to == x->exp) {
+        planRec(p, "%s is %s (y_mean %.0f) but expcomp %ld is at the safety limit %d-%d: change the light",
+                x->s.face ? "the face" : "the frame", delta > 0 ? "dark" : "bright", y, x->exp, AUTO_EXP_MIN,
+                AUTO_EXP_MAX);
+        return;
+    }
+    char a[16], f[16];
+    snprintf(a, sizeof a, "%ld", to);
+    snprintf(f, sizeof f, "%ld", x->exp);
+    planChange(p, "expcomp", a, f, a, "%s y_mean %.0f is %s %.0f-%.0f", x->s.face ? "face" : "frame", y,
+               delta > 0 ? "below" : "above", lo, hi);
+}
+
+static void ruleHighlights(const AutoCtx *x, AutoPlan *p) {
+    double lo = x->s.face ? AUTO_Y_FACE_LO : AUTO_Y_FRAME_LO, hi = x->s.face ? AUTO_Y_FACE_HI : AUTO_Y_FRAME_HI;
+    if (x->s.frame.clip_high_pct <= AUTO_CLIP_HIGH_FRAME || x->s.ev.y_mean < lo || x->s.ev.y_mean > hi) return;
+    if (x->hasHdr && !strcmp(x->hdr, "off"))
+        planChange(p, "hdr", "on", "off", "on", "%.1f%% of the frame is blown out (above %.0f%%)",
+                   x->s.frame.clip_high_pct, AUTO_CLIP_HIGH_FRAME);
+    else if (x->hasHdr)
+        planRec(p, "%.1f%% of the frame is blown out although hdr is on: dim the window or lower expcomp by hand",
+                x->s.frame.clip_high_pct);
+}
+
+static void ruleShadows(const AutoCtx *x, AutoPlan *p) {
+    double hi = x->s.face ? AUTO_Y_FACE_HI : AUTO_Y_FRAME_HI;
+    if (x->s.ev.clip_low_pct <= AUTO_CLIP_LOW || x->s.ev.y_mean > hi) return;
+    if (x->hasHdr && !strcmp(x->hdr, "off") && !planHas(p, "hdr"))
+        planChange(p, "hdr", "on", "off", "on", "%.1f%% of the %s is crushed to black (above %.0f%%)",
+                   x->s.ev.clip_low_pct, x->s.face ? "face" : "frame", AUTO_CLIP_LOW);
+    else if (x->hasExp && !planHas(p, "expcomp")) {
+        long to = bandStep(x->exp, AUTO_EXP_SHADOW_STEP, AUTO_EXP_MIN, AUTO_EXP_MAX);
+        char a[16], f[16];
+        snprintf(a, sizeof a, "%ld", to);
+        snprintf(f, sizeof f, "%ld", x->exp);
+        if (to != x->exp)
+            planChange(p, "expcomp", a, f, a, "%.1f%% of the %s is crushed to black (above %.0f%%)",
+                       x->s.ev.clip_low_pct, x->s.face ? "face" : "frame", AUTO_CLIP_LOW);
+    }
+}
+
+static void ruleWhiteBalance(const AutoCtx *x, AutoPlan *p) {
+    double b = x->s.ev.wb_bias;
+    if (b < 0 || (b <= AUTO_WB_HI && b >= AUTO_WB_LO) || !x->hasAwb) return;
+    int warm = b > AUTO_WB_HI;  // too much red: less warmth
+    if (!strcmp(x->awb, "on") && x->hasWarmth) {
+        long to = bandStep(x->warmth, warm ? -AUTO_WARMTH_STEP : AUTO_WARMTH_STEP, AUTO_WARMTH_MIN, AUTO_WARMTH_MAX);
+        char a[16], f[16];
+        snprintf(a, sizeof a, "%ld", to);
+        snprintf(f, sizeof f, "%ld", x->warmth);
+        if (to == x->warmth)
+            planRec(p, "wb_bias %.2f but warmth %ld is at the safety limit %d-%d", b, x->warmth, AUTO_WARMTH_MIN,
+                    AUTO_WARMTH_MAX);
+        else
+            planChange(p, "warmth", a, f, a, "%s wb_bias %.2f is %s %.2f", x->s.face ? "face" : "frame", b,
+                       warm ? "above" : "below", warm ? AUTO_WB_HI : AUTO_WB_LO);
+    } else if (!strcmp(x->awb, "off") && x->hasWb) {
+        char a[16], f[16];
+        snprintf(a, sizeof a, "%ld", x->wb + (warm ? -AUTO_KELVIN_STEP : AUTO_KELVIN_STEP));
+        snprintf(f, sizeof f, "%ld", x->wb);
+        planChange(p, "wb", a, f, a, "%s wb_bias %.2f is %s %.2f (awb is off)", x->s.face ? "face" : "frame", b,
+                   warm ? "above" : "below", warm ? AUTO_WB_HI : AUTO_WB_LO);
+    }
+}
+
+static void ruleFraming(const AutoCtx *x, AutoPlan *p) {
+    if (!x->s.face || x->s.fraction >= AUTO_FACE_SMALL || !(x->hasFov || x->hasZoom)) return;
+    if (!x->framing) {
+        planRec(p, "the face is %.1f%% of the frame: %s would fill it better (auto changes framing only with --framing)",
+                100 * x->s.fraction, x->hasFov && strcmp(x->fov, "65") ? "`brioctl fov -`" : "`brioctl zoom +25`");
+        return;
+    }
+    if (x->hasFov && strcmp(x->fov, "65"))
+        planChange(p, "fov", "-", x->fov, !strcmp(x->fov, "90") ? "78" : "65", "face is %.1f%% of the frame (below %.0f%%)",
+                   100 * x->s.fraction, 100 * AUTO_FACE_SMALL);
+    else if (x->hasZoom) {
+        char f[16], t[16];
+        snprintf(f, sizeof f, "%ld", x->zoom);
+        snprintf(t, sizeof t, "%ld", x->zoom + AUTO_ZOOM_STEP);
+        planChange(p, "zoom", "+25", f, t, "face is %.1f%% of the frame (below %.0f%%)", 100 * x->s.fraction,
+                   100 * AUTO_FACE_SMALL);
+    }
+}
+
+static void ruleFocus(const AutoCtx *x, AutoPlan *p) {
+    if (x->step > 1 && x->firstSharp > 0 && x->s.frame.sharpness < AUTO_SHARP_DROP * x->firstSharp)
+        planRec(p, "sharpness fell to %.0f%% of the first frame: check the focus (auto does not touch it)",
+                100 * x->s.frame.sharpness / x->firstSharp);
+}
+
+// The whole rule set, tried in this order; one control is changed once per step (the first rule that asks wins).
+static const struct { const char *id, *when, *does; void (*fire)(const AutoCtx *, AutoPlan *); } AUTO_RULES[] = {
+    {"exposure", "y_mean outside 105-140 (face) or 90-140 (frame)", "expcomp +/-12, kept in 96-176", ruleExposure},
+    {"highlights", "frame clip_high_pct > 3 and y_mean in range", "hdr on (once); with hdr on, a note", ruleHighlights},
+    {"shadows", "clip_low_pct > 5 and y_mean <= 140", "hdr on, else expcomp +8 (kept in 96-176)", ruleShadows},
+    {"white_balance", "wb_bias > 1.12 or < 0.90", "awb on: warmth -/+6 (30-70); awb off: wb -/+300 K", ruleWhiteBalance},
+    {"framing", "face_fraction < 0.04", "note; with --framing fov - (else zoom +25)", ruleFraming},
+    {"focus", "sharpness < 50% of the first frame", "note only", ruleFocus},
+};
+
+static void autoDecide(const AutoCtx *x, AutoPlan *p) {
+    memset(p, 0, sizeof *p);
+    for (size_t i = 0; i < sizeof AUTO_RULES / sizeof *AUTO_RULES; i++) AUTO_RULES[i].fire(x, p);
+}
+
+// 0 when everything is in range; the more the picture is off, the bigger (used to see whether a step helped).
+static double autoScore(const AutoShot *s) {
+    double lo = s->face ? AUTO_Y_FACE_LO : AUTO_Y_FRAME_LO, hi = s->face ? AUTO_Y_FACE_HI : AUTO_Y_FRAME_HI;
+    double y = s->ev.y_mean, b = s->ev.wb_bias, sc = 0;
+    sc += y < lo ? (lo - y) / 35 : y > hi ? (y - hi) / 35 : 0;
+    if (b >= 0) sc += b > AUTO_WB_HI ? (b - AUTO_WB_HI) / 0.2 : b < AUTO_WB_LO ? (AUTO_WB_LO - b) / 0.2 : 0;
+    if (s->ev.clip_low_pct > AUTO_CLIP_LOW) sc += (s->ev.clip_low_pct - AUTO_CLIP_LOW) / 20;
+    if (s->frame.clip_high_pct > AUTO_CLIP_HIGH_FRAME) sc += (s->frame.clip_high_pct - AUTO_CLIP_HIGH_FRAME) / 20;
+    return sc;
+}
+
+static int autoNum(Cam *c, const char *name, long *v) {
+    const Ctrl *k = findCtrl(c, name);
+    return k && avail(c, k) && !getField(c, k, GET_CUR, v) ? 0 : -1;
+}
+
+static int autoStr(Cam *c, const char *name, char out[16]) {
+    const Ctrl *k = findCtrl(c, name);
+    return k && avail(c, k) && !readCtrl(c, k, out, NULL, NULL) ? 0 : -1;
+}
+
+static void autoRead(Cam *c, AutoCtx *x) {
+    x->hasExp = !autoNum(c, "expcomp", &x->exp);
+    x->hasWarmth = !autoNum(c, "warmth", &x->warmth);
+    x->hasWb = !autoNum(c, "wb", &x->wb);
+    x->hasHdr = !autoStr(c, "hdr", x->hdr);
+    x->hasAwb = !autoStr(c, "awb", x->awb);
+    x->hasFov = !autoStr(c, "fov", x->fov);
+    x->hasZoom = !autoNum(c, "zoom", &x->zoom);
+}
+
+// One frame, judged on the face when --target face finds one. Returns the status of capture.
+static int autoShoot(Cam *c, const char *path, double wait, int wantFace, AutoShot *out) {
+    static struct capture_result r;
+    struct capture_opts o = {.path = path, .count = 1, .wait = wait, .no_face = !wantFace};
+    o.vid = target.vid, o.pid = target.pid, o.loc = target.loc;
+    long v;
+    if (!autoNum(c, "expcomp", &v)) o.expcomp = (int)v, o.have_state = 1;
+    if (!autoNum(c, "warmth", &v)) o.warmth = (int)v;
+    char s[16];
+    if (!autoStr(c, "hdr", s)) o.hdr = !strcmp(s, "on");
+    int rc = brioctl_capture(&o, &r);
+    if (rc || r.n < 1) {
+        fprintf(stderr, "%s\n", r.error[0] ? r.error : "capture failed");
+        return rc ? rc : 1;
+    }
+    memset(out, 0, sizeof *out);
+    out->frame = r.stats[0];
+    out->face = r.face[0].faces > 0;
+    out->ev = out->face ? r.face[0].stats : r.stats[0];
+    out->fraction = r.face[0].fraction, out->cx = r.face[0].cx, out->cy = r.face[0].cy;
+    return 0;
+}
+
+// set() prints "name value" for itself; auto prints its own report.
+static int autoSet(Cam *c, const AutoChange *ch) {
+    fflush(stdout);
+    int saved = dup(1), nul = open("/dev/null", O_WRONLY);
+    if (saved >= 0 && nul >= 0) dup2(nul, 1);
+    if (nul >= 0) close(nul);
+    allowRel = 1;
+    int r = set(c, ch->name, ch->arg);
+    allowRel = 0;
+    fflush(stdout);
+    if (saved >= 0) dup2(saved, 1), close(saved);
+    return r;
+}
+
+static void autoShotJson(const AutoShot *s) {
+    printf("{\"judged\":\"%s\",", s->face ? "face" : "frame");
+    if (s->face) printf("\"face_fraction\":%.4f,", s->fraction);
+    statsMembers(&s->ev, 0);
+    printf(",\"frame_clip_high_pct\":%.3f}", s->frame.clip_high_pct);
+}
+
+static void autoShotText(const char *label, const AutoShot *s) {
+    printf("%-8s%-6s y_mean %6.1f  clip_low %5.1f%%  clip_high(frame) %5.1f%%  wb_bias %5.2f  sharpness %7.1f\n", label,
+           s->face ? "face" : "frame", s->ev.y_mean, s->ev.clip_low_pct, s->frame.clip_high_pct, s->ev.wb_bias,
+           s->ev.sharpness);
+}
+
+static int autoUsage(void) {
+    fprintf(stderr, "usage: brioctl auto [--target face|frame] [--dry-run] [--save] [--max-steps N] [--json] "
+                    "[--framing] [--wait SEC]\n");
+    return 2;
+}
+
+static int autoCmd(Cam *c, int argc, char **argv, int doSave) {
+    int wantFace = 1, maxSteps = 4, json = 0, framing = 0;
+    double wait = 1.0;
+    for (int i = 2; i < argc; i++) {
+        const char *a = argv[i], *v = i + 1 < argc ? argv[i + 1] : NULL;
+        if (!strcmp(a, "--json")) json = 1;
+        else if (!strcmp(a, "--framing")) framing = 1;
+        else if (!v) return autoUsage();
+        else if (!strcmp(a, "--target")) {
+            if (!strcmp(v, "face")) wantFace = 1;
+            else if (!strcmp(v, "frame")) wantFace = 0;
+            else return autoUsage();
+            i++;
+        } else if (!strcmp(a, "--max-steps")) {
+            char *end;
+            long n = strtol(v, &end, 10);
+            if (!*v || *end || n < 1 || n > AUTO_MAX_STEPS_LIMIT) {
+                fprintf(stderr, "--max-steps takes a number from 1 to %d\n", AUTO_MAX_STEPS_LIMIT);
+                return 2;
+            }
+            maxSteps = (int)n;
+            i++;
+        } else if (!strcmp(a, "--wait")) {
+            if (parseSeconds(v, &wait)) {
+                fprintf(stderr, "--wait takes a number of seconds (0 to 3600)\n");
+                return 2;
+            }
+            i++;
+        } else return autoUsage();
+    }
+    char path[PATH_MAX];
+    const char *tmp = getenv("TMPDIR");
+    snprintf(path, sizeof path, "%s/brioctl-auto-%d.jpg", tmp && *tmp ? tmp : "/tmp", (int)getpid());
+
+    AutoShot before, now, shots[AUTO_MAX_STEPS_LIMIT];
+    AutoPlan plan, plans[AUTO_MAX_STEPS_LIMIT];
+    AutoCtx x = {.framing = framing};
+    int nsteps = 0, rc = 0, ntouched = 0, nrecs = 0;
+    const char *stopped = "max_steps";
+    char noteFace[160] = "", touched[8][16], recs[16][200];
+    double prevScore = 0, lastWait = wait;
+    int framingOnly = 0;  // the last step only changed the framing, which the score does not see
+
+    if ((rc = autoShoot(c, path, lastWait, wantFace, &now))) { unlink(path); return rc; }
+    before = now;
+    if (wantFace && !now.face) snprintf(noteFace, sizeof noteFace, "no face found: judged on the whole frame");
+    for (int step = 1;; step++) {
+        autoRead(c, &x);
+        x.s = now, x.step = step;
+        if (step == 1) x.firstSharp = now.frame.sharpness;
+        autoDecide(&x, &plan);
+        for (int i = 0; i < plan.nrec; i++) {  // each note once
+            int dup = 0;
+            for (int j = 0; j < nrecs; j++) dup |= !strcmp(recs[j], plan.rec[i]);
+            if (!dup && nrecs < 16) snprintf(recs[nrecs++], sizeof recs[0], "%s", plan.rec[i]);
+        }
+        if (!plan.n) { stopped = "in_range"; break; }
+        if (step > 1 && !framingOnly && autoScore(&now) >= prevScore - 0.01) { stopped = "no_improvement"; break; }
+        if (step > maxSteps) { stopped = "max_steps"; break; }
+        shots[nsteps] = now, plans[nsteps++] = plan;
+        if (dryRun) { stopped = "dry_run"; break; }
+        prevScore = autoScore(&now);
+        int ok = 0, framed = 0, other = 0;
+        for (int i = 0; i < plan.n; i++) {
+            AutoChange *ch = &plan.ch[i];
+            char cur[16];
+            if (autoSet(c, ch)) {
+                if (nrecs < 16) snprintf(recs[nrecs++], sizeof recs[0], "%s could not be set (see the message above)", ch->name);
+                continue;
+            }
+            ok++;
+            int fr = !strcmp(ch->name, "zoom") || !strcmp(ch->name, "fov");
+            framed |= fr, other |= !fr;
+            if (!autoStr(c, ch->name, cur)) snprintf(plans[nsteps - 1].ch[i].to, sizeof ch->to, "%s", cur);
+            int seen = 0;
+            for (int j = 0; j < ntouched; j++) seen |= !strcmp(touched[j], ch->name);
+            if (!seen && ntouched < 8) snprintf(touched[ntouched++], sizeof touched[0], "%s", ch->name);
+        }
+        if (!ok) { stopped = "no_improvement"; break; }
+        framingOnly = framed && !other;
+        lastWait = framed && wait < 3.5 ? 3.5 : wait;  // a new framing needs the camera longer to settle
+        if ((rc = autoShoot(c, path, lastWait, wantFace, &now))) break;
+    }
+    unlink(path);
+    if (rc) return rc;
+
+    int saved = 0;
+    if (doSave && !dryRun && ntouched) {
+        fflush(stdout);
+        int sv = dup(1), nul = open("/dev/null", O_WRONLY);
+        if (json && sv >= 0 && nul >= 0) dup2(nul, 1);
+        if (nul >= 0) close(nul);
+        saved = !save(c, "settings");
+        fflush(stdout);
+        if (sv >= 0) dup2(sv, 1), close(sv);
+    }
+    int changed = !dryRun && ntouched;
+    if (json) {
+        printf("{\"target\":\"%s\",\"dry_run\":%s,\"steps\":[", wantFace ? "face" : "frame", dryRun ? "true" : "false");
+        for (int s = 0; s < nsteps; s++) {
+            printf("%s{\"step\":%d,\"stats\":", s ? "," : "", s + 1);
+            autoShotJson(&shots[s]);
+            printf(",\"changes\":[");
+            for (int i = 0; i < plans[s].n; i++) {
+                const AutoChange *ch = &plans[s].ch[i];
+                printf("%s{\"name\":", i ? "," : "");
+                jstr(ch->name);
+                printf(",\"from\":");
+                jstr(ch->from);
+                printf(",\"to\":");
+                jstr(ch->to[0] ? ch->to : ch->arg);
+                printf(",\"why\":");
+                jstr(ch->why);
+                printf("}");
+            }
+            printf("]}");
+        }
+        printf("],\"before\":");
+        autoShotJson(&before);
+        printf(",\"after\":");
+        if (changed || !dryRun) autoShotJson(&now);
+        else printf("null");
+        printf(",\"applied\":{");
+        for (int i = 0; i < ntouched && changed; i++) {
+            char cur[16] = "";
+            autoStr(c, touched[i], cur);
+            printf("%s\"%s\":", i ? "," : "", touched[i]);
+            jstr(cur);
+        }
+        printf("},\"recommendations\":[");
+        for (int i = 0; i < nrecs; i++) {
+            if (i) putchar(',');
+            jstr(recs[i]);
+        }
+        printf("],\"note\":");
+        jstr(noteFace[0] ? noteFace : NULL);
+        printf(",\"saved\":%s,\"stopped\":\"%s\"}\n", saved ? "true" : "false", stopped);
+    } else {
+        if (noteFace[0]) printf("note: %s\n", noteFace);
+        for (int s = 0; s < nsteps; s++) {
+            char lab[16];
+            snprintf(lab, sizeof lab, "step %d", s + 1);
+            autoShotText(lab, &shots[s]);
+            for (int i = 0; i < plans[s].n; i++)
+                printf("        %s %s -> %s  (%s)%s\n", plans[s].ch[i].name, plans[s].ch[i].from,
+                       plans[s].ch[i].to[0] ? plans[s].ch[i].to : plans[s].ch[i].arg, plans[s].ch[i].why,
+                       dryRun ? "  [dry run, not applied]" : "");
+        }
+        if (!dryRun) autoShotText("after", &now);
+        for (int i = 0; i < nrecs; i++) printf("advice: %s\n", recs[i]);
+        printf("stopped: %s%s\n", stopped, saved ? " (saved)" : "");
+    }
+    return 0;
 }
 
 static void usage(FILE *f) {
@@ -2743,8 +3230,10 @@ static void usage(FILE *f) {
                "       brioctl watch [FILE]        apply FILE now, when the camera is connected and when video starts\n"
                "       brioctl factory-reset --yes restart the MX Brio with factory settings, then restore yours\n"
                "       brioctl describe [--json]   what every control means, its range, settle time, risk; read-only\n"
-               "       brioctl capture [-o PATH] [--count N] [--interval SEC] [--wait SEC] [--size WxH] [--stats] [--json]\n"
+               "       brioctl capture [-o PATH] [--count N] [--interval SEC] [--wait SEC] [--size WxH] [--stats] [--json] [--no-face]\n"
                "                                   JPEG frames from the camera (macOS asks for camera access), with picture stats\n"
+               "       brioctl auto [--target face|frame] [--dry-run] [--save] [--max-steps N] [--json] [--framing]\n"
+               "                                   measure the picture, nudge expcomp/hdr/warmth, measure again (undo undoes it)\n"
                "       brioctl dump                list all UVC units and extension controls (read-only)\n"
                "       brioctl snapshot [FILE]     write every register brioctl reads, serial masked (read-only)\n"
                "       brioctl --version           print the version\n");
@@ -3443,7 +3932,7 @@ int main(int argc, char **argv) {
     const char *cmd = argc > 1 ? argv[1] : "show";
     static const char *const OTHER[] = {"show", "dump", "save", "defaults", "factory-reset", "--json", "snapshot",
                                         "get", "describe", "list", "profiles", "import", "capture", "watch", "help",
-                                        "-h", "--help", "version", "--version", "install-skill"};
+                                        "-h", "--help", "version", "--version", "install-skill", "auto"};
     int isSetCmd = 1;  // NAME VALUE ...
     for (size_t i = 0; i < sizeof OTHER / sizeof *OTHER; i++)
         if (!strcmp(cmd, OTHER[i])) isSetCmd = 0;
@@ -3453,7 +3942,8 @@ int main(int argc, char **argv) {
         fprintf(stderr, "--dry-run: not available for %s\n", cmd);
         return 2;
     }
-    if (doSave && !(isSetCmd || !strcmp(cmd, "apply") || !strcmp(cmd, "undo") || !strcmp(cmd, "defaults"))) {
+    int isAuto = !strcmp(cmd, "auto");
+    if (doSave && !(isAuto || isSetCmd || !strcmp(cmd, "apply") || !strcmp(cmd, "undo") || !strcmp(cmd, "defaults"))) {
         fprintf(stderr, "--save: only for setting values, apply, defaults and undo\n");
         return 2;
     }
@@ -3533,14 +4023,14 @@ int main(int argc, char **argv) {
     int isCommand = 0;
     for (size_t i = 0; i < sizeof COMMANDS / sizeof *COMMANDS; i++)
         if (!strcmp(cmd, COMMANDS[i])) isCommand = 1;
-    if (isCommand ? argc > 3 : argc % 2 == 0) { usage(stderr); return 2; }
+    if (!isAuto && (isCommand ? argc > 3 : argc % 2 == 0)) { usage(stderr); return 2; }
 
     if ((rc = selectCamera(camId))) return rc;
     Cam c;
     if (openCam(&c)) return 1;
     snprintf(undoCameraLine, sizeof undoCameraLine, "# camera %04x:%04x%s%s", c.info.vid, c.info.pid,
              c.info.serial[0] ? " " : "", c.info.serial);
-    undoOn = changes || !strcmp(cmd, "factory-reset");
+    undoOn = changes || isAuto || !strcmp(cmd, "factory-reset");
     if (!strcmp(cmd, "show")) rc = show(&c);
     else if (!strcmp(cmd, "--json")) rc = showJson(&c);
     else if (!strcmp(cmd, "get")) rc = get(&c, arg);
@@ -3551,6 +4041,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(cmd, "apply")) rc = apply(&c, arg ? arg : "settings");
     else if (!strcmp(cmd, "undo")) rc = undoCmd(&c);
     else if (!strcmp(cmd, "defaults")) rc = defaults(&c);
+    else if (isAuto) rc = autoCmd(&c, argc, argv, doSave);
     else if (!strcmp(cmd, "factory-reset")) rc = factoryReset(&c, arg && !strcmp(arg, "--yes"));
     else {
         allowRel = 1;
@@ -3575,7 +4066,7 @@ int main(int argc, char **argv) {
         }
         printf("]}\n");
     }
-    if (doSave && !rc) rc = save(&c, "settings");
+    if (doSave && !rc && !isAuto) rc = save(&c, "settings");
     if (closeCam(&c)) rc = 1;
     return rc;
 }
