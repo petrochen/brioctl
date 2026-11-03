@@ -11,13 +11,22 @@ LIBS = -framework IOKit -framework CoreFoundation -framework CoreAudio -framewor
 # capture.m is the only file that uses AVFoundation (`brioctl capture`); the rest never triggers the camera prompt.
 OBJLIBS = -framework AVFoundation -framework CoreMedia -framework CoreVideo -framework ImageIO -framework CoreGraphics
 DEFS = -DVERSION=\"$(VERSION)\"
+# Embedded Info.plist (camera usage string): a host app without its own still gets the permission prompt, not a crash.
+INFOPLIST = -Wl,-sectcreate,__TEXT,__info_plist,brioctl-info.generated.plist
 
 # Release build: one binary for Apple Silicon and Intel, runs on macOS 12 and later.
 UNIVERSAL = -arch arm64 -arch x86_64 -mmacosx-version-min=12.0
 DIST = brioctl-$(VERSION)-macos-universal
 
-brioctl: brioctl.c capture.m capture.h Makefile
-	$(CC) $(CFLAGS) $(DEFS) -fobjc-arc -o $@ brioctl.c capture.m $(LIBS) $(OBJLIBS)
+# VERSION goes into the embedded plist; written every time so that make VERSION=x is never stale.
+brioctl-info.generated.plist: brioctl-info.plist FORCE
+	sed 's|@VERSION@|$(VERSION)|g' brioctl-info.plist > $@.new
+	cmp -s $@.new $@ && rm $@.new || mv $@.new $@
+
+FORCE:
+
+brioctl: brioctl.c capture.m capture.h Makefile brioctl-info.generated.plist
+	$(CC) $(CFLAGS) $(DEFS) -fobjc-arc -o $@ brioctl.c capture.m $(LIBS) $(OBJLIBS) $(INFOPLIST)
 
 # Offline tests: the same source against a camera read from tests/mxbrio-1.1.394.snap
 tests/brioctl-fake: brioctl.c capture.m capture.h Makefile
@@ -47,8 +56,8 @@ test-app:
 	$(MAKE) -C app test
 
 # Always rebuilt: it replaces ./brioctl with the universal binary.
-universal:
-	$(CC) $(CFLAGS) $(DEFS) $(UNIVERSAL) -fobjc-arc -o brioctl brioctl.c capture.m $(LIBS) $(OBJLIBS)
+universal: brioctl-info.generated.plist
+	$(CC) $(CFLAGS) $(DEFS) $(UNIVERSAL) -fobjc-arc -o brioctl brioctl.c capture.m $(LIBS) $(OBJLIBS) $(INFOPLIST)
 
 # $(DIST).tar.gz with the universal binary, README.md and LICENSE.
 dist: universal
@@ -78,6 +87,6 @@ unagent:
 clean:
 	$(MAKE) -C tools clean
 	$(MAKE) -C app clean
-	rm -rf brioctl tests/brioctl-fake tests/brioctl-fake.dSYM brioctl.dSYM brioctl-*-macos-universal brioctl-*.tar.gz
+	rm -rf brioctl brioctl-info.generated.plist tests/brioctl-fake tests/brioctl-fake.dSYM brioctl.dSYM brioctl-*-macos-universal brioctl-*.tar.gz
 
-.PHONY: universal dist install agent unagent clean test fixtures app app-zip test-app
+.PHONY: FORCE universal dist install agent unagent clean test fixtures app app-zip test-app
