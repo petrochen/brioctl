@@ -13,7 +13,7 @@ brew install --cask petrochen/tap/brioctl-app # menu bar app
 
 ![brioctl in the terminal: show the settings, change the field of view, zoom and HDR, show them again](docs/media/cli.gif)
 
-<img src="docs/media/app.png" alt="The brioctl menu bar window with the Logitech settings of an MX Brio" width="420">
+<img src="docs/media/app.png" alt="The brioctl menu bar window with the Logitech settings of an MX Brio" width="389">
 
 The command-line tool is one C file that talks to the camera through IOKit. It needs no driver, no root and no
 third-party library. The [menu bar app](#menu-bar-app) gives the same controls in a window.
