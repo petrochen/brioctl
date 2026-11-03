@@ -278,6 +278,15 @@ brioctl warmth 40 && sleep 1 && brioctl capture -o cool.jpg --stats   # change a
 
 `describe` only reads. The microphone volume (`micgain`) is listed too, for the MX Brio.
 
+## For AI agents
+
+An AI coding or desktop agent (Claude Code, Codex, Cursor, Raycast AI) can operate the camera through the CLI alone, with
+no MCP server: `brioctl --json` and `brioctl describe --json` to read, `brioctl NAME VALUE` to change, and `brioctl
+capture --json` to measure the picture. [docs/agents.md](docs/agents.md) describes the read, act, verify loop,
+what each control does, how to read the capture numbers and what an agent must not touch. For Claude Code and Codex,
+[skills/brioctl/SKILL.md](skills/brioctl/SKILL.md) is a compact skill that can be copied to `~/.claude/skills/brioctl/`
+or `~/.codex/skills/brioctl/`.
+
 ## Supported cameras
 
 `brioctl list` finds every USB device that has a UVC VideoControl interface and says how far brioctl supports it:
