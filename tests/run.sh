@@ -2030,6 +2030,139 @@ PY
 N=0
 FAILED=0
 
+t_describe_json() {
+    python3 -I -c pass >/dev/null 2>&1 || { echo "# python3 not available"; return 77; }
+    "$BIN" describe --json > out.json || return 1
+    python3 -I - out.json <<'PY' || return 1
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["camera"]["model"] == "MX Brio" and "serial" not in d["camera"], d["camera"]
+c = {x["name"]: x for x in d["controls"]}
+keys = {"name", "group", "kind", "unit", "min", "max", "step", "choices", "default", "current", "auto", "writable",
+        "meaning", "effect_on_image", "settle_seconds", "risky", "risk"}
+for name, x in c.items():
+    assert set(x) == keys, (name, sorted(set(x) ^ keys))
+    assert x["meaning"], name
+    assert isinstance(x["settle_seconds"], float) and x["settle_seconds"] > 0, name
+assert [n for n, x in c.items() if x["risky"]] == ["mic"], [n for n, x in c.items() if x["risky"]]
+assert c["mic"]["risk"] and c["fov"]["risk"] is None
+assert c["zoom"]["settle_seconds"] == 3.5 and c["pan"]["settle_seconds"] == 3.5
+assert c["warmth"]["settle_seconds"] == 1.0 and c["expcomp"]["settle_seconds"] == 1.0 and c["tint"]["settle_seconds"] == 1.0
+assert c["fov"]["settle_seconds"] == 0.3 and c["mic"]["settle_seconds"] == 0.3
+w = c["warmth"]
+assert (w["kind"], w["min"], w["max"], w["step"], w["default"], w["current"]) == ("number", 0, 100, 1, 50, 62), w
+assert w["meaning"] == "white balance warmth, 50 = neutral, higher = warmer"
+assert c["fov"]["kind"] == "choice" and c["fov"]["choices"] == ["90", "78", "65"] and c["fov"]["current"] == "78"
+assert c["hdr"]["kind"] == "bool" and c["hdr"]["choices"] == ["on", "off"] and c["hdr"]["effect_on_image"]
+assert c["zoom"]["current"] == 115 and c["exposure"]["auto"] is True
+assert c["micgain"]["current"] == 0.2785
+PY
+}
+
+t_describe_text_and_errors() {
+    out=$("$BIN" describe 2>&1); rc=$?
+    expect "status" "$rc" 0 || return 1
+    has "heading" "$out" "MX Brio" || return 1
+    matches "warmth block" "$out" "^warmth  .*now 62, default 50" || return 1
+    has "risk" "$out" "RISKY: the camera restarts" || return 1
+    out=$("$BIN" describe nonsense 2>&1); rc=$?
+    expect "bad argument status" "$rc" 2 || return 1
+    # a camera that is not the MX Brio gets its own controls, with the same fields
+    out=$("$BIN" --camera 1 describe --json 2>&1 < /dev/null) || return 1
+    BRIOCTL_FAKE=$PWD/generic.snap "$BIN" describe --json > g.json || return 1
+    python3 -I -c "
+import json
+d = json.load(open('g.json'))
+assert d['controls'] and all(x['meaning'] and x['settle_seconds'] > 0 for x in d['controls'])
+assert not any(x['name'] in ('warmth', 'fov', 'micgain') for x in d['controls'])
+assert all(x['settle_seconds'] == 0.3 for x in d['controls'] if x['name'] in ('zoom', 'pan'))
+" || return 1
+}
+
+t_describe_writes_nothing() {
+    BRIOCTL_FAKE_TRACE=1 "$BIN" describe --json 2> trace > /dev/null || return 1
+    expect "SET_CUR count" "$(setcurs trace)" 0
+}
+
+t_capture_stats_json() {
+    python3 -I -c pass >/dev/null 2>&1 || { echo "# python3 not available"; return 77; }
+    "$BIN" capture -o shot.jpg --stats --json > out.json 2> err; rc=$?
+    expect "status" "$rc" 0 || return 1
+    expect "stderr" "$(cat err)" "" || return 1
+    [ "$(head -c 3 shot.jpg | od -An -tx1 | tr -d ' ')" = ffd8ff ] || { echo "# shot.jpg is not a JPEG"; return 1; }
+    python3 -I - out.json <<'PY' || return 1
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert set(d) == {"files", "frames", "avg"} and d["files"] == ["shot.jpg"] and len(d["frames"]) == 1
+keys = {"width", "height", "y_mean", "y_p5", "y_p95", "y_stddev", "clip_low_pct", "clip_high_pct", "saturation_mean",
+        "rgb_mean", "wb_bias", "sharpness"}
+f = d["frames"][0]
+assert set(f) == keys and set(d["avg"]) == keys and set(f["rgb_mean"]) == {"r", "g", "b"}, f
+assert (f["width"], f["height"]) == (640, 360)
+assert 0 <= f["y_p5"] <= f["y_mean"] <= f["y_p95"] <= 255 and f["y_stddev"] > 0
+assert 0 <= f["clip_low_pct"] <= 100 and 0 <= f["clip_high_pct"] <= 100 and 0 <= f["saturation_mean"] <= 1
+assert abs(f["wb_bias"] - f["rgb_mean"]["r"] / f["rgb_mean"]["b"]) < 1e-3 and f["sharpness"] > 0
+assert f == d["avg"]  # one frame: the average is the frame
+PY
+}
+
+t_capture_text_and_naming() {
+    out=$("$BIN" capture --stats 2>&1); rc=$?
+    expect "status" "$rc" 0 || return 1
+    has "default file" "$out" "capture.jpg" || return 1
+    [ -s capture.jpg ] || { echo "# capture.jpg missing"; return 1; }
+    for k in width height y_mean y_p5 y_p95 y_stddev clip_low_pct clip_high_pct saturation_mean rgb_mean wb_bias sharpness; do
+        matches "$k line" "$out" "^  $k +[0-9r]" || return 1
+    done
+    out=$("$BIN" capture -o shots/x.jpg 2>&1); rc=$?
+    expect "missing directory status" "$rc" 1 || return 1
+    has "missing directory message" "$out" "cannot write shots/x.jpg" || return 1
+    out=$("$BIN" capture --count 3 --interval 0 --wait 0 -o pic.jpeg --stats 2>&1); rc=$?
+    expect "count status" "$rc" 0 || return 1
+    for i in 1 2 3; do [ -s pic-$i.jpeg ] || { echo "# pic-$i.jpeg missing"; return 1; }; done
+    [ ! -e pic.jpeg ] || { echo "# pic.jpeg should not exist with --count 3"; return 1; }
+    has "frame 3" "$out" "frame 3" || return 1
+    has "average" "$out" "average" || return 1
+    "$BIN" capture --count 2 -o noext > /dev/null || return 1
+    [ -s noext-1 ] && [ -s noext-2 ] || { echo "# noext-N missing"; return 1; }
+    mkdir d.d && "$BIN" capture --count 2 -o d.d/a > /dev/null || return 1
+    [ -s d.d/a-1 ] || { echo "# dot in directory name confused the extension"; return 1; }
+}
+
+t_capture_json_count_and_size() {
+    python3 -I -c pass >/dev/null 2>&1 || { echo "# python3 not available"; return 77; }
+    "$BIN" capture --count 3 --size 320x180 -o c.jpg --json > out.json || return 1
+    python3 -I - out.json <<'PY' || return 1
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["files"] == ["c-1.jpg", "c-2.jpg", "c-3.jpg"], d["files"]
+assert len(d["frames"]) == 3 and all((f["width"], f["height"]) == (320, 180) for f in d["frames"])
+assert d["avg"]["y_mean"] == d["frames"][0]["y_mean"]
+PY
+}
+
+t_capture_errors() {
+    for bad in "--count 0" "--count 101" "--count x" "--interval -1" "--wait x" "--size 640" "--size 0x10" "--size 10x10x" \
+        "--bogus" "-o" "--count"; do
+        # shellcheck disable=SC2086
+        out=$("$BIN" capture $bad 2>&1); rc=$?
+        expect "capture $bad status" "$rc" 2 || return 1
+    done
+    [ ! -e capture.jpg ] || { echo "# a rejected command wrote capture.jpg"; return 1; }
+    out=$(BRIOCTL_FAKE_CAPTURE_DENIED=1 "$BIN" capture 2>&1); rc=$?
+    expect "denied status" "$rc" 3 || return 1
+    has "denied message" "$out" "camera access is denied" || return 1
+    [ ! -e capture.jpg ] || { echo "# denied capture wrote a file"; return 1; }
+    out=$("$BIN" --camera 9 capture 2>&1); rc=$?
+    expect "unknown camera status" "$rc" 2 || return 1
+    has "unknown camera message" "$out" "no camera matches 9" || return 1
+}
+
+t_capture_touches_no_register() {
+    BRIOCTL_FAKE_TRACE=1 "$BIN" capture --stats > /dev/null 2> trace || return 1
+    expect "SET_CUR count" "$(setcurs trace)" 0
+}
+
 run() {  # run NAME FUNCTION
     N=$((N + 1))
     dir=$ROOT/$N
@@ -2139,6 +2272,15 @@ run "import optionsplus: the default profile, the selected preset, the user's ow
 run "import optionsplus skips manual exposure and focus, pan, RightSight and warns about wb" t_import_what_it_does_not_trust
 run "import optionsplus: line breaks in the file's text make no lines in the output" t_import_text_from_the_file_is_harmless
 run "the Logi Options+ fixtures hold no account data and the .db equals the .json" t_optionsplus_fixture_is_anonymous
+
+run "describe --json: every control has meaning, settle_seconds and the full set of fields" t_describe_json
+run "describe prints text, rejects bad arguments, also fits another camera" t_describe_text_and_errors
+run "describe only reads" t_describe_writes_nothing
+run "capture --stats --json: shape, ranges, a real JPEG" t_capture_stats_json
+run "capture: text stats, default file, -N naming, write errors" t_capture_text_and_naming
+run "capture --count --size --json" t_capture_json_count_and_size
+run "capture: bad options exit 2, denied access exits 3, unknown camera" t_capture_errors
+run "capture writes no camera register" t_capture_touches_no_register
 
 echo "1..$N"
 if [ "$FAILED" -ne 0 ]; then
