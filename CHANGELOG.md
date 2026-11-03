@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `brioctl capture [-o PATH] [--count N] [--interval SEC] [--wait SEC] [--size WxH] [--stats] [--json]` grabs frames
+  from the chosen camera with AVFoundation and writes JPEG files, while another app may be using the camera. `--stats`
+  and `--json` report the luma mean, 5th and 95th percentile and contrast, clipped shadows and highlights, saturation,
+  mean red, green and blue, the white balance bias and the sharpness of each frame and their average. macOS asks for
+  camera access on the first use; if it is denied the exit status is 3. Only this command uses AVFoundation (the new
+  `capture.m`), so the other commands never trigger the prompt.
+- `brioctl describe [--json]` lists every control of the camera with its range, step, default and current value, what
+  it means, what it does to the picture, how long to wait after a change (`settle_seconds`) and whether changing it
+  interrupts the video (`risky`). It only reads.
+
+### Changed
+
+- The Makefile builds `capture.m` with `-fobjc-arc` and links AVFoundation, CoreMedia, CoreVideo, ImageIO and
+  CoreGraphics.
+
 ## 1.1.0 — 2026-11-02
 
 ### Added

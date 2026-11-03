@@ -40,6 +40,8 @@ Not affiliated with or endorsed by Logitech. See [Disclaimer](#disclaimer).
 - `--json` output and `get NAME` for scripts.
 - `snapshot` for bug reports, `defaults` to go back to the camera's default values, and `factory-reset` to restart the
   MX Brio with factory settings and then restore yours.
+- `capture` and `describe`, so a script or an AI agent can see the picture and know what each setting does: see
+  [Capture and describe](#capture-and-describe).
 - A read-only `dump` of every unit and extension control the camera has.
 
 ### Compared with
@@ -193,6 +195,8 @@ brioctl factory-reset --yes          # restart the MX Brio with factory settings
 brioctl watch [FILE]                 # apply now, on connect and on video start (see below)
 brioctl dump                         # all units and registers of the camera, read-only
 brioctl snapshot [FILE]              # every register brioctl reads, serial number masked
+brioctl capture --stats              # a JPEG frame (capture.jpg) and numbers about the picture
+brioctl describe --json              # what every control of the camera means, read-only
 brioctl --version
 brioctl help
 ```
@@ -204,6 +208,75 @@ A settings file is plain text: one `name value` per line, and `#` starts a comme
 `# camera VID:PID SERIAL`. `apply` prints a warning when the file was saved from another model and still applies the
 settings that fit; `watch` does not apply such a file at all. The line holds the camera's serial number, so remove it
 before you post the file.
+
+## Capture and describe
+
+Two commands for scripts and AI agents that adjust the camera and want to check the result.
+
+```sh
+brioctl capture [-o PATH] [--count N] [--interval SEC] [--wait SEC] [--size WxH] [--stats] [--json]
+brioctl describe [--json]
+```
+
+`capture` grabs frames with AVFoundation and writes JPEG files:
+
+- `-o PATH` is the file, `capture.jpg` in the current directory by default. With `--count N` (1 to 100) the files are
+  `capture-1.jpg`, `capture-2.jpg` and so on: `-N` goes before the extension of `PATH`, or at the end if it has none.
+- `--wait SEC` (default 1) is the time between opening the camera and the first frame, so that the exposure and white
+  balance settle. `--interval SEC` (default 1) is the time between frames.
+- `--size WxH` asks for a format. Without it brioctl takes the camera's largest format up to 1920x1080, unless another
+  app is using the camera: then it leaves the format that app chose, because the format is shared and changing it
+  restarts the other app's stream. `--size` always changes it.
+- The camera can be in use already. A video call and `capture` are two clients of the same camera.
+- `--camera ID` works as everywhere. brioctl finds the macOS video device of the chosen camera by its location id and
+  its vendor and product ids (the unique id of a USB camera in macOS), so two identical cameras are not confused.
+- It reads nothing from and writes nothing to the camera's registers. Only `capture` uses AVFoundation: no other
+  command, `fov 65` for example, triggers the camera permission prompt.
+
+**Camera permission.** The first time, macOS asks whether the app you ran `brioctl` from (Terminal, iTerm, an editor,
+the app that runs your agent) may use the camera. If the answer was No, `capture` prints how to change it
+(System Settings > Privacy & Security > Camera) and exits with status 3. Status 1 is any other error, 2 a wrong command
+line.
+
+`--stats` measures the picture in plain C on the 8-bit BGRA frame and prints, for each frame (and the average of all
+frames when there are several):
+
+| Field             | Meaning                                                                                      |
+| ----------------- | -------------------------------------------------------------------------------------------- |
+| `width`, `height` | The size of the frame in pixels.                                                             |
+| `y_mean`          | Mean luma, 0-255 (Rec. 601 weights).                                                         |
+| `y_p5`, `y_p95`   | The 5th and 95th percentile of luma: how dark the shadows and how bright the highlights are. |
+| `y_stddev`        | Standard deviation of luma, the contrast.                                                    |
+| `clip_low_pct`    | Percent of pixels with luma below 16 (crushed blacks).                                       |
+| `clip_high_pct`   | Percent of pixels with luma above 235 (blown highlights).                                    |
+| `saturation_mean` | Mean HSV saturation, 0-1.                                                                    |
+| `rgb_mean`        | Mean of red, green and blue, 0-255.                                                          |
+| `wb_bias`         | `r_mean / b_mean`: above 1 the picture is warm, below 1 it is blue. `null` if blue is zero.  |
+| `sharpness`       | Variance of a 3x3 Laplacian of the luma, on the picture reduced to at most 640 pixels wide.  |
+
+`--json` prints `{"files":[...],"frames":[{...}],"avg":{...}}` on one line and always includes the statistics. Without
+`--json` and `--stats` the command prints the file names only.
+
+```sh
+brioctl capture --stats --json                    # one frame and its numbers
+brioctl capture --count 3 --interval 0.5 --stats  # three frames, the numbers of each, and the average
+brioctl warmth 40 && sleep 1 && brioctl capture -o cool.jpg --stats   # change a setting, wait for it, look
+```
+
+`describe` says what each control of the chosen camera is, as text or, with `--json`, as `{"camera":{...},
+"controls":[...]}`. Every entry has:
+
+- `name`, `group`, `kind` (`number`, `bool` or `choice`), `unit`, `min`, `max`, `step`, `choices`, `default`,
+  `current`, `auto` (an automatic mode is setting it now) and `writable`, from the camera, as in `--json`.
+- `meaning`: what the setting is, in one line.
+- `effect_on_image`: what to expect in the picture, or `null`. It is written only where this document or the camera's
+  own documentation backs it.
+- `settle_seconds`: how long to wait after a change before a frame shows it. 1 second for exposure and white balance,
+  3.5 for `zoom` and `pan` on the MX Brio (they glide to the new value), 0.3 for the rest.
+- `risky` and `risk`: `true` and the reason for a setting that interrupts the video. `mic` restarts the camera about 2
+  seconds after a change; `privacy` may cover the lens.
+
+`describe` only reads. The microphone volume (`micgain`) is listed too, for the MX Brio.
 
 ## Supported cameras
 
