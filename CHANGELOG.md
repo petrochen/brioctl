@@ -4,52 +4,26 @@
 
 ### Added
 
-- `brioctl auto [--target face|frame] [--dry-run] [--save] [--max-steps N] [--json] [--framing] [--wait SEC]` measures
-  the picture, nudges `expcomp`, `hdr` and `warmth` (or `wb` with `awb` off) by a small step, and measures again, up to
-  4 steps by default. The rules are a short table (README, "Automatic adjustment"); it stays in `expcomp` 96-176 and
-  `warmth` 30-70, and touches `fov` and `zoom` only with `--framing`, never `mic` or `privacy`. Changes go through the
-  normal set path, so `--dry-run`, `--save` and `undo` work, and one `undo` takes back the whole run.
-- `capture` reports the largest face of each frame (Vision, on the picture reduced to 640 pixels wide): `"face"` with
-  the frame's statistics over the face box enlarged by 20%, `faces`, `face_fraction` and `face_center`, or `null`. Text
-  mode with `--stats` adds a `face` block. `--no-face` skips Vision. Links `-framework Vision`.
-- `brioctl capture [-o PATH] [--count N] [--interval SEC] [--wait SEC] [--size WxH] [--stats] [--json]` grabs frames
-  from the chosen camera with AVFoundation and writes JPEG files, while another app may be using the camera. `--stats`
-  and `--json` report the luma mean, 5th and 95th percentile and contrast, clipped shadows and highlights, saturation,
-  mean red, green and blue, the white balance bias and the sharpness of each frame and their average. macOS asks for
-  camera access on the first use; if it is denied the exit status is 3. Only this command uses AVFoundation (the new
-  `capture.m`), so the other commands never trigger the prompt.
-- `brioctl describe [--json]` lists every control of the camera with its range, step, default and current value, what
-  it means, what it does to the picture, how long to wait after a change (`settle_seconds`) and whether changing it
-  interrupts the video (`risky`). It only reads.
-
-- Relative values: `brioctl expcomp +10 warmth -5 zoom +25` adds to the current value of a numeric control and clamps
-  to the camera's range; named controls (`hdr +1`) exit with status 2. On signed controls (`pan`, `tilt`, `roll`,
-  `brightness`, `hue`) `-N` stays a negative absolute value and `+-N` subtracts. `fov +` and `fov -` step to the next
-  wider or narrower angle (65, 78, 90). A settings file cannot hold a relative value.
-- `--dry-run` (before or after the command) for setting values, `apply`, `defaults` and `undo`: prints `NAME old ->
-  new` or `NAME value unchanged` and writes nothing; with `--json` it prints
-  `{"changes":[{"name","from","to","unchanged"}]}`.
-- `brioctl undo` puts back what the last changing command replaced. Before a write, the old values of the controls
-  about to change are kept in `~/.config/brioctl/undo` (set, `apply`, `defaults`, the restore of `factory-reset`);
-  `undo` rewrites the file with what it replaced, so a second `undo` redoes the change. `undo --dry-run` shows it
-  first.
-- `--save` after setting values, `apply`, `defaults` or `undo` runs `brioctl save` after a successful write, so the
-  change survives the next video start under `watch`. The README's watch section says that unsaved changes are
-  reverted.
-- `brioctl install-skill [--claude|--codex|--all] [--uninstall]` copies the AI agent skill to
-  `~/.claude/skills/brioctl` and `~/.codex/skills/brioctl` (by default only where `~/.claude` / `~/.codex` exist). It
-  reads `skills/brioctl/SKILL.md` next to the binary, else `../share/brioctl/skills/brioctl/SKILL.md`, else the copy
-  built into the binary (the Makefile generates `skill-embedded.h` from the skill file). `make install` and the
-  Homebrew formula install the skill into `share/brioctl/skills/brioctl/`.
+- `brioctl auto [--dry-run] [--save] [--json] [--framing]`: measures the picture (two frames averaged, 2 s after each
+  change), nudges `expcomp`, `hdr` and `warmth` in up to 4 steps, stops when in range, not improving or oscillating.
+- `brioctl capture` reports the largest face of each frame (Vision): `face` statistics, `faces`, `face_fraction`,
+  `face_center`.
+- `brioctl capture [-o PATH] [--count N] [--interval SEC] [--wait SEC] [--size WxH] [--stats] [--json]`: JPEG frames
+  and picture statistics through AVFoundation, while another app uses the camera; exit status 3 if access is denied.
+- `brioctl describe [--json]`: every control with range, default, meaning, effect on the picture, `settle_seconds`
+  and `risky`; read-only.
+- Relative values (`expcomp +10 warmth -5`, `fov +` / `fov -`).
+- `--dry-run` for setting values, `apply`, `defaults` and `undo`; prints `NAME old -> new`, writes nothing.
+- `brioctl undo` puts back what the last changing command replaced (`~/.config/brioctl/undo`, serial masked).
+- `--save` after a change runs `brioctl save`, so `watch` keeps it.
+- `brioctl install-skill [--uninstall]` copies the AI agent skill into every existing `~/.claude/skills` and
+  `~/.codex/skills`.
 
 ### Changed
 
-- `undo` keeps the value from before the first write of a control within one command, instead of one entry per write.
-- `make` with no target builds the CLI (the first rule used to be the Info.plist).
-- A `-N` value on a named control (`fov -1`, `backlight -1`) now exits with status 2 instead of 1; `-N` on an unsigned
-  number (`warmth -1`) is a relative change instead of an out-of-range error.
-- The Makefile builds `capture.m` with `-fobjc-arc` and links AVFoundation, CoreMedia, CoreVideo, ImageIO and
-  CoreGraphics.
+- `undo` keeps the value from before the first write of a control within one command.
+- `make` with no target builds the CLI.
+- `-N` on a named control (`fov -1`) exits with status 2; `-N` on an unsigned number (`warmth -1`) is relative.
 
 ## 1.1.0 — 2026-11-02
 

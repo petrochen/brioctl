@@ -1,17 +1,14 @@
-# VHS tape for docs/media/agent-demo.gif: the agent loop (read, auto, verify, undo).
-# Render with `make demo-gif` (add this target: `demo-gif: tests/brioctl-fake` then `vhs docs/media/agent-demo.tape`).
-# Run it from the repository root. It uses the fake build, so no camera is touched:
-#   BRIOCTL_FAKE points at a throwaway copy of tests/mxbrio-1.1.394.snap, and the `brioctl` alias runs tests/brioctl-fake.
-# NOT rendered yet. The fake build has no camera: its `capture` draws a picture that follows the fake camera's expcomp
-# and warmth, with one fixed face, so `auto` converges (expcomp 128 -> 152, warmth 62 -> 50 in two steps).
-# Install vhs: brew install vhs
+# VHS tape for docs/media/agent-demo.gif: the agent loop (read, auto, verify, undo). Render from the repository root:
+#   make tests/brioctl-fake && vhs docs/media/agent-demo.tape
+# It uses the fake build, so no camera is touched: BRIOCTL_FAKE is a throwaway copy of tests/mxbrio-1.1.394.snap and
+# `brioctl` is an alias of tests/brioctl-fake. The fake picture follows the fake camera's settings, so `auto` converges.
 
 Output docs/media/agent-demo.gif
 
 Set Shell "bash"
-Set FontSize 16
+Set FontSize 15
 Set Width 1200
-Set Height 640
+Set Height 560
 Set Padding 20
 Set Theme "Catppuccin Mocha"
 Set TypingSpeed 45ms
@@ -34,9 +31,9 @@ Sleep 600ms
 Type "brioctl auto --dry-run" Enter
 Sleep 3000ms
 
-Type "# 3. Act: up to 4 measured steps, kept with --save" Enter
+Type "# 3. Act: up to 4 measured steps" Enter
 Sleep 600ms
-Type "brioctl auto --save" Enter
+Type "brioctl auto" Enter
 Sleep 3500ms
 
 Type "# 4. Verify: measure again" Enter

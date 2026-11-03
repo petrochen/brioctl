@@ -5,32 +5,29 @@ description: Read and change webcam settings on macOS with the brioctl CLI (Logi
 
 # brioctl: operate the webcam from the shell
 
-`brioctl` reads and writes camera settings (macOS only). Install: `brew install petrochen/tap/brioctl`. Full guide:
-`docs/agents.md` in the brioctl repo. Ranges differ per camera: **`brioctl describe --json` is the source of truth** for
-names, ranges, defaults, settle times and risky controls. Use only controls it lists.
+`brioctl` reads and writes camera settings (macOS only). Install: `brew install petrochen/tap/brioctl`. Ranges differ
+per camera: **`brioctl describe --json` is the source of truth** for names, ranges, defaults, settle times and risky
+controls. Use only controls it lists.
 
 ## Loop: auto, verify, hand-tune
 
-Start with `brioctl auto --json` (`--dry-run` first if unsure): it measures the face, changes `expcomp` / `hdr` /
-`warmth` in up to 4 small steps (`expcomp` stays 96-176, `warmth` 30-70), never `mic`, `privacy`, `fov` or `zoom`
-(`--framing` allows `fov -` / `zoom +25` for a small face), and returns `before`, `after`, `applied`,
-`recommendations`, `stopped`. One `brioctl undo` reverts the run; `--save` keeps it. Then verify with a frame and fix by
-hand only what is left:
+Start with `brioctl auto --json` (`--dry-run` first if unsure): it measures the face (two frames averaged, 2 s after
+each change), changes `expcomp` +-10 / `hdr` / `warmth` +-4 in up to 4 steps (`expcomp` stays 96-176, `warmth` 30-70),
+never `mic`, `privacy`, `fov` or `zoom` (`--framing` allows `fov -` / `zoom +25` for a small face), and returns
+`before`, `after`, `applied`, `recommendations`, `stopped` (`in_range`, `no_improvement`, `oscillating`, `max_steps`,
+`dry_run`). One `brioctl undo` reverts the run; `--save` keeps it. Then verify and fix by hand only what is left:
 
-1. Read: `brioctl --json` (settings, `status.video.on`), `brioctl describe --json`, and
-   `brioctl capture --json -o frame.jpg` (measure the picture; `--json` implies `--stats`).
-2. Decide the smallest change from the stats below.
-3. Act: `brioctl NAME VALUE [NAME VALUE ...]`, e.g. `brioctl hdr on expcomp 135`.
-4. Wait for the camera to settle, then check: `brioctl get NAME` and `brioctl capture --json` again.
+1. Read: `brioctl --json` (settings, `status.video.on`), `brioctl describe --json`, `brioctl capture --json -o f.jpg`.
+2. Act with the smallest change the stats below call for: `brioctl hdr on expcomp 135`.
+3. Wait for the camera to settle, then check `brioctl get NAME` and `brioctl capture --json` again.
 
 Relative values skip the read: `brioctl expcomp +10 warmth -5` (numbers only, clamped to the range; `pan +-5` to subtract
 on a signed control, `fov +` / `fov -` for the next wider / narrower angle). Preview with `--dry-run` (`--json` gives
 `{"changes":[{"name","from","to","unchanged"}]}`); put back the last change with `brioctl undo`.
 
-Change one or two things at a time. Always use `--json` when parsing. With several cameras pass `--camera ID`
-(`brioctl list --json`). Check the exit status: 1 error, 2 camera not chosen or bad command line, 3 capture permission
-denied (tell the user to allow the terminal in System Settings, Privacy & Security, Camera). Errors are plain text on
-stderr.
+Change one or two things at a time. Use `--json` when parsing. With several cameras pass `--camera ID` (`brioctl list
+--json`). Exit status: 1 error, 2 camera not chosen or bad command line, 3 capture permission denied (tell the user to
+allow the terminal in System Settings, Privacy & Security, Camera). Errors are plain text on stderr.
 
 ## Controls (MX Brio values)
 
@@ -54,14 +51,13 @@ stderr.
 | `smooth`     | on, off               | off     | Zoom and pan glide in about 3 s                                   |
 | `mic`        | on, off               | off     | Camera microphone; camera restarts about 2 s after a change       |
 
-A value marked `*` (or `"auto": true`) is being set by an automatic mode; switch the mode off before writing it, and
-restore `auto` afterwards.
+A value marked `*` (`"auto": true`) is set by an automatic mode: switch the mode off first, restore `auto` afterwards.
 
-## Settle times (`settle_seconds` from `describe`, MX Brio)
+## Settle times (`settle_seconds` from `describe` wins)
 
-`zoom`, `pan`: 3.5 s. `expcomp`, `hdr`, `warmth`, `tint`, `wb`, `awb`, `ae`, `exposure`, `gain`, `priority`: 1 s.
-Everything else: 0.3 s. `mic` also restarts the camera about 2 s after a change. `describe` wins if it differs.
-`capture` waits `--wait` (default 1 s) before the first frame; for zoom/pan add `sleep 3.5`.
+MX Brio: `zoom`, `pan` 3.5 s; `expcomp`, `hdr`, `warmth`, `tint`, `wb`, `awb`, `ae`, `exposure`, `gain` 1 s (the picture
+keeps adapting for about 2 s); the rest 0.3 s. `mic` restarts the camera about 2 s later. `capture` waits `--wait`
+(default 1 s) before the first frame.
 
 ## Reading `capture --stats`
 
@@ -70,21 +66,19 @@ Everything else: 0.3 s. `mic` also restarts the camera about 2 s after a change.
   Low with no clipping: raise `expcomp`. High: lower it.
 - `clip_high_pct` (luma > 235) above 2: blown highlights. Lower `expcomp` or turn `hdr on`.
 - `clip_low_pct` (luma < 16) high: crushed shadows. Raise `expcomp` or turn `hdr on`.
-- `y_p95` minus `y_p5` large: high-contrast scene (window behind the user); prefer `hdr on` over raising `expcomp`.
+- `y_p95` minus `y_p5` large: window behind the user; prefer `hdr on` over raising `expcomp`.
 - `wb_bias` (r_mean / b_mean): above 1.15 too warm, lower `warmth`; below 0.85 too cool, raise `warmth`. A coloured
   scene skews it.
 - `sharpness` (Laplacian variance): compare before and after on the same scene. Low: check `af` and `focus`.
-- Real MX Brio on a lit desk: `y_mean` ~95, `y_p5` 17, `y_p95` 174, `clip_low_pct` 3.7, `clip_high_pct` 0, `wb_bias` 1.03,
-  `sharpness` ~480-510: dark-ish, nothing blown, room to raise `expcomp`.
-- `--count 3 --interval 1` gives an `avg` if frames fluctuate. `capture` is read-only and works while another app
-  streams; without `--size` it keeps that app's format, so never pass `--size` during a call.
+- Single frames are noisy: `--count 3 --interval 0.5` gives an `avg`. `capture` is read-only and works during a call;
+  never pass `--size` then (it restarts the other app's stream).
 
 ## Persistence
 
 `brioctl save NAME` / `brioctl apply NAME` store and restore settings (`brioctl profiles --json` lists files and
 presets). A `watch` LaunchAgent puts `~/.config/brioctl/settings` back on connect and video start and undoes unsaved
 changes, so add `--save` to a change the user wants to keep (`brioctl expcomp +10 --save`; ask before overwriting their
-file), or point them to "Remember current settings" in the menu bar app. `brioctl install-skill` installs this skill.
+file), or point them to "Remember current settings" in the menu bar app.
 
 ## Do not
 

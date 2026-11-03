@@ -15,16 +15,8 @@ what other projects report and are marked experimental. Every other UVC camera g
 | Logitech Brio 4K Stream Edition | `046d:086b` | yes      | yes | HDR                       | yes     | experimental, untested     | -           |
 | Any other UVC camera   | any         | those it declares | no  | no                        | yes     | standard, untested         | -           |
 
-## What the columns mean
-
-- **Standard controls**: the UVC controls the camera declares (brightness, contrast, saturation, sharpness, white
-  balance, exposure, focus, zoom, pan and tilt, backlight compensation and so on), with the camera's own ranges.
-- **FOV**: the field of view switch (90, 78 or 65 degrees). On the experimental models it is written only after the
-  camera confirms the control is present and writable.
-- **Show Mode, HDR and others**: `hdr` is the backlight compensation control under its Logitech name. Show Mode and the
-  status fields (RightSight and others) exist only where the table says so. `factory-reset` works on the MX Brio only.
-- **`watch`**: re-applying saved settings when video starts. It works with any camera; the MX Brio also reports video
-  start through a HID report.
+Standard controls are the UVC controls the camera declares. FOV is the 90/78/65 switch, written on the experimental
+models only after the camera confirms the control. `hdr` is the backlight compensation. `watch` works with any camera.
 
 ## Untested on hardware
 

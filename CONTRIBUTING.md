@@ -9,17 +9,14 @@ make app        # the menu bar app (needs Swift), build/brioctl.app
 make test-app   # unit tests of the app
 ```
 
-The tests never touch a real camera. They run the same source against snapshots in `tests/`.
+The tests never touch a real camera: the same source is built with `-DBRIOCTL_FAKE` and answers from the register
+snapshots in `tests/` (`make fixtures` derives the others). `brioctl snapshot FILE` makes one for a bug report.
 
 ## Report a camera
 
-brioctl is tested on hardware with the MX Brio only. If you own another UVC camera, run `brioctl list`, try a few
-settings and open a [camera report](https://github.com/petrochen/brioctl/issues/new?template=camera_report.yml). Attach
-the output of `brioctl dump`, which only reads the camera. The current state of each model is in
-[COMPATIBILITY.md](COMPATIBILITY.md).
-
-You do not need to touch firmware or write to unknown registers for any of this, and please do not. brioctl writes only
-the controls it knows.
+Only the MX Brio is tested on hardware. With another UVC camera, run `brioctl list`, try a few settings and open a
+[camera report](https://github.com/petrochen/brioctl/issues/new?template=camera_report.yml) with the output of
+`brioctl dump` (read-only). Status per model: [COMPATIBILITY.md](COMPATIBILITY.md). Do not write to unknown registers.
 
 ## Bugs and ideas
 
