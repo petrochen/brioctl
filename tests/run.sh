@@ -717,7 +717,7 @@ please report with 'brioctl snapshot'" || return 1
     expect "fov 90 and Show Mode off" "$(grep -o 'unit [0-9]* sel [0-9]* [0-9a-f]*' trace | tr '\n' ' ')" \
         "unit $VIDEOPIPE sel 5 00 unit $VIDEOPIPE sel 13 00 " || return 1
     # the register says 0-255: only the table counts
-    for bad in 3 255 100 -1; do
+    for bad in 3 255 100; do
         out=$("$BIN" fov $bad 2>&1); rc=$?
         expect "fov $bad status" "$rc" 1 || return 1
         has "fov $bad message" "$out" "bad value" || return 1
@@ -1804,7 +1804,7 @@ t_value_must_fit_the_control() {
     edit_reg "$PU" 3 max ffff
     edit_reg "$PU" 2 min 0080
     edit_reg "$PU" 2 max ff7f
-    for cmd in "warmth 256" "warmth -1" "contrast 65536" "contrast -1" "brightness 32768" "brightness -32769"; do
+    for cmd in "warmth 256" "contrast 65536" "brightness 32768" "brightness -32769"; do
         out=$(BRIOCTL_FAKE_TRACE=1 "$BIN" $cmd 2>&1); rc=$?
         expect "$cmd status" "$rc" 1 || return 1
         has "$cmd message" "$out" "out of range" || return 1
@@ -1874,7 +1874,7 @@ t_decimal_degrees() {
     expect "just above the top" "$rc" 1 || return 1
     has "range in the message" "$out" "out of range (-20..20)" || return 1
     # not numbers, and not decimals for a control that has none
-    for bad in abc 1.2.3 nan inf -inf 1e2 0x10 . - + -. +-1 --1 1,5 "1 2" ""; do
+    for bad in abc 1.2.3 nan inf -inf 1e2 0x10 . - + -. --1 1,5 "1 2" ""; do
         "$BIN" pan "$bad" > /dev/null 2>&1; rc=$?
         expect "pan '$bad' status" "$rc" 1 || return 1
     done
@@ -1895,11 +1895,12 @@ t_hdr_and_backlight_both_ways() {
     expect "hdr 1" "$("$BIN" hdr 1)" "hdr on" || return 1
     expect "backlight off" "$("$BIN" backlight off)" "hdr off" || return 1
     expect "backlight on" "$("$BIN" backlight on)" "hdr on" || return 1
-    for v in 2 -1 yes; do
+    for v in 2 yes; do
         out=$("$BIN" backlight $v 2>&1); rc=$?
         expect "backlight $v status" "$rc" 1 || return 1
         has "backlight $v message" "$out" "bad value $v" || return 1
     done
+    "$BIN" backlight -1 > /dev/null 2>&1; expect "backlight -1 is a relative value on a name control" "$?" 2 || return 1
     # a camera with a number: on and off are 1 and 0 under both names
     export BRIOCTL_FAKE=$PWD/generic.snap
     expect "hdr off" "$("$BIN" hdr off)" "backlight 0" || return 1
@@ -2163,6 +2164,249 @@ t_capture_touches_no_register() {
     expect "SET_CUR count" "$(setcurs trace)" 0
 }
 
+# --- relative values, --dry-run, undo, --save, install-skill -----------------------------------------------------------
+
+t_relative_values() {
+    expect "start" "$("$BIN" get expcomp)" 128 || return 1
+    expect "expcomp +10" "$("$BIN" expcomp +10)" "expcomp 138" || return 1
+    expect "warmth -5 zoom +25 mixed with absolute" "$("$BIN" warmth -5 tint 60 zoom +25 | tr '\n' ' ')" "warmth 57 tint 60 zoom 140 " || return 1
+    expect "clamped at the top" "$("$BIN" expcomp +500)" "expcomp 255" || return 1
+    expect "clamped at the bottom" "$("$BIN" expcomp -500)" "expcomp 0" || return 1
+    expect "zoom -1000 stops at the camera minimum" "$("$BIN" zoom -1000)" "zoom 100" || return 1
+    expect "no write when clamped to the same value" "$(BRIOCTL_FAKE_TRACE=1 "$BIN" zoom -5 2>&1 | grep -c 'fake SET_CUR')" 0 || return 1
+    # signed controls keep -N as an absolute value; +-N subtracts
+    expect "pan -10 is absolute" "$("$BIN" pan -10)" "pan -10" || return 1
+    expect "pan +-5" "$("$BIN" pan +-5)" "pan -15" || return 1
+    expect "pan +2.5" "$("$BIN" pan +2.5)" "pan -12.50" || return 1
+    for bad in "expcomp +x" "expcomp ++5" "expcomp +" "expcomp -"; do
+        out=$("$BIN" $bad 2>&1); rc=$?
+        expect "$bad status" "$rc" 1 || return 1
+        has "$bad message" "$out" "bad value" || return 1
+    done
+    expect "nothing changed by bad values" "$("$BIN" get expcomp)" 0 || return 1
+}
+
+t_relative_values_on_names_exit_2() {
+    for bad in "hdr +1" "hdr -" "showmode +1" "flicker +10" "ae -1" "fov +1"; do
+        out=$(BRIOCTL_FAKE_TRACE=1 "$BIN" $bad 2>&1); rc=$?
+        expect "$bad status" "$rc" 2 || return 1
+        has "$bad message" "$out" "this control takes names" || return 1
+        hasnt "$bad write" "$out" "fake SET_CUR" || return 1
+    done
+    "$BIN" expcomp 100 hdr +1 > out 2> err; rc=$?
+    expect "mixed status" "$rc" 2 || return 1
+    expect "the valid part is still set" "$("$BIN" get expcomp)" 100 || return 1
+}
+
+t_fov_steps() {
+    expect "start" "$("$BIN" get fov)" 78 || return 1
+    expect "narrower" "$("$BIN" fov -)" "fov 65" || return 1
+    expect "narrowest stays" "$("$BIN" fov -)" "fov 65" || return 1
+    expect "wider" "$("$BIN" fov +)" "fov 78" || return 1
+    expect "widest" "$("$BIN" fov + )" "fov 90" || return 1
+    expect "widest stays" "$("$BIN" fov +)" "fov 90" || return 1
+}
+
+t_relative_not_from_a_file() {
+    printf 'expcomp +10\nzoom 130\n' > rel
+    out=$("$BIN" apply ./rel 2>&1); rc=$?
+    expect "status" "$rc" 1 || return 1
+    has "message" "$out" "only for the command line" || return 1
+    expect "expcomp untouched" "$("$BIN" get expcomp)" 128 || return 1
+    expect "the absolute line was applied" "$("$BIN" get zoom)" 130 || return 1
+}
+
+t_dry_run() {
+    cp camera.snap before.snap
+    out=$("$BIN" expcomp +10 warmth 62 fov 65 --dry-run); rc=$?
+    expect "status" "$rc" 0 || return 1
+    expect "text" "$out" "expcomp 128 -> 138
+warmth 62 unchanged
+fov 78 -> 65" || return 1
+    expect "after the command works too" "$("$BIN" --dry-run expcomp +10)" "expcomp 128 -> 138" || return 1
+    out=$("$BIN" --dry-run --json expcomp +10 warmth 62); rc=$?
+    expect "json" "$out" '{"changes":[{"name":"expcomp","from":"128","to":"138","unchanged":false},{"name":"warmth","from":"62","to":"62","unchanged":true}]}' || return 1
+    expect "json after" "$("$BIN" expcomp +10 --json --dry-run)" '{"changes":[{"name":"expcomp","from":"128","to":"138","unchanged":false}]}' || return 1
+    cmp -s camera.snap before.snap || { echo "# the camera changed"; return 1; }
+    [ ! -e "$HOME/.config/brioctl/undo" ] || { echo "# an undo file was written"; return 1; }
+    BRIOCTL_FAKE_TRACE=1 "$BIN" --dry-run zoom 150 mic off 2> trace > /dev/null
+    expect "no SET_CUR" "$(setcurs trace)" 0 || return 1
+    # errors are still errors
+    out=$("$BIN" --dry-run zoom 500 2>&1); rc=$?
+    expect "bad value status" "$rc" 1 || return 1
+    has "bad value" "$out" "out of range" || return 1
+    out=$("$BIN" --dry-run hdr +1 2>&1); rc=$?
+    expect "name control status" "$rc" 2 || return 1
+    out=$("$BIN" --dry-run micgain 0.5 2>&1)
+    has "micgain" "$out" "micgain" || return 1
+}
+
+t_dry_run_apply_and_defaults() {
+    "$BIN" expcomp 200 warmth 70 > /dev/null || return 1
+    "$BIN" save before > /dev/null || return 1
+    "$BIN" expcomp 100 > /dev/null || return 1
+    rm "$HOME/.config/brioctl/undo"
+    cp camera.snap before.snap
+    out=$("$BIN" apply before --dry-run) || return 1
+    has "apply plan" "$out" "expcomp 100 -> 200" || return 1
+    has "apply unchanged" "$out" "warmth 70 unchanged" || return 1
+    out=$("$BIN" apply before --dry-run --json) || return 1
+    has "apply json" "$out" '{"name":"expcomp","from":"100","to":"200","unchanged":false}' || return 1
+    out=$("$BIN" defaults --dry-run) || return 1
+    has "defaults plan" "$out" "warmth 70 -> 50" || return 1
+    out=$("$BIN" defaults --dry-run --json) || return 1
+    has "defaults json" "$out" '"name":"warmth","from":"70","to":"50"' || return 1
+    cmp -s camera.snap before.snap || { echo "# the camera changed"; return 1; }
+    [ ! -e "$HOME/.config/brioctl/undo" ] || { echo "# an undo file was written"; return 1; }
+    for bad in watch factory-reset save snapshot capture; do
+        "$BIN" $bad --dry-run > /dev/null 2>&1; rc=$?
+        expect "$bad --dry-run status" "$rc" 2 || return 1
+    done
+    "$BIN" get expcomp --save > /dev/null 2>&1; expect "--save with get" "$?" 2 || return 1
+    "$BIN" expcomp 1 --dry-run --save > /dev/null 2>&1; expect "--dry-run --save" "$?" 2 || return 1
+}
+
+t_undo() {
+    out=$("$BIN" undo 2>&1); rc=$?
+    expect "nothing to undo" "$rc" 1 || return 1
+    has "message" "$out" "nothing to undo" || return 1
+    "$BIN" expcomp +10 warmth -5 fov 65 > /dev/null || return 1
+    f=$HOME/.config/brioctl/undo
+    matches "header line" "$(sed -n 1p "$f")" '^# brioctl undo, [0-9]{4}-[0-9]{2}-[0-9]{2} [0-9:]{8}, brioctl expcomp \+10 warmth -5 fov 65$' || return 1
+    matches "camera line" "$(sed -n 2p "$f")" '^# camera 046d:0944' || return 1
+    expect "values, newest first" "$(sed 1,2d "$f" | tr '\n' ' ')" "fov 78 warmth 62 expcomp 128 " || return 1
+    out=$("$BIN" undo --dry-run) || return 1
+    expect "dry run" "$out" "fov 65 -> 78
+warmth 57 -> 62
+expcomp 138 -> 128" || return 1
+    expect "dry run keeps the file" "$(sed 1,2d "$f" | tr '\n' ' ')" "fov 78 warmth 62 expcomp 128 " || return 1
+    "$BIN" undo > /dev/null || return 1
+    expect "expcomp back" "$("$BIN" get expcomp)" 128 || return 1
+    expect "warmth back" "$("$BIN" get warmth)" 62 || return 1
+    expect "fov back" "$("$BIN" get fov)" 78 || return 1
+    matches "undo's own header" "$(sed -n 1p "$f")" ', brioctl undo$' || return 1
+    "$BIN" undo > /dev/null || return 1   # undo of undo
+    expect "redone" "$("$BIN" get expcomp)/$("$BIN" get warmth)/$("$BIN" get fov)" "138/57/65" || return 1
+}
+
+t_undo_records_only_changes() {
+    "$BIN" expcomp 140 > /dev/null || return 1
+    "$BIN" expcomp 150 warmth 62 tint 50 > /dev/null || return 1   # warmth and tint already have these values
+    expect "only what changed" "$(sed 1,2d "$HOME/.config/brioctl/undo")" "expcomp 140" || return 1
+    "$BIN" expcomp 150 > /dev/null   # nothing changes: the record stays
+    expect "kept" "$(sed 1,2d "$HOME/.config/brioctl/undo")" "expcomp 140" || return 1
+    "$BIN" get expcomp > /dev/null
+    "$BIN" --dry-run expcomp 1 > /dev/null
+    expect "reads and dry runs keep it" "$(sed 1,2d "$HOME/.config/brioctl/undo")" "expcomp 140" || return 1
+    "$BIN" expcomp 999 > /dev/null 2>&1   # refused: nothing written, nothing recorded
+    expect "refused" "$(sed 1,2d "$HOME/.config/brioctl/undo")" "expcomp 140" || return 1
+}
+
+t_undo_apply_defaults_and_mic_last() {
+    "$BIN" expcomp 200 warmth 70 > /dev/null || return 1
+    "$BIN" save mine > /dev/null || return 1
+    "$BIN" defaults > /dev/null || return 1
+    f=$HOME/.config/brioctl/undo
+    matches "defaults header" "$(sed -n 1p "$f")" ', brioctl defaults$' || return 1
+    has "defaults recorded" "$(cat "$f")" "warmth 70" || return 1
+    "$BIN" undo > /dev/null || return 1
+    expect "defaults undone" "$("$BIN" get expcomp)/$("$BIN" get warmth)" "200/70" || return 1
+    "$BIN" apply neutral > /dev/null || return 1
+    matches "apply header" "$(sed -n 1p "$f")" ', brioctl apply neutral$' || return 1
+    "$BIN" undo > /dev/null || return 1
+    expect "apply undone" "$("$BIN" get warmth)" 70 || return 1
+    # mic goes last when restoring
+    "$BIN" mic off expcomp 10 > /dev/null || return 1
+    BRIOCTL_FAKE_TRACE=1 "$BIN" undo 2> trace > /dev/null || return 1
+    expect "mic last" "$(grep -o 'sel [0-9]* [0-9a-f]*' trace | tail -1 | cut -d' ' -f2)" 16 || return 1
+}
+
+t_undo_after_factory_reset_restore() {
+    "$BIN" expcomp 200 > /dev/null || return 1
+    "$BIN" factory-reset --yes > /dev/null 2>&1; rc=$?
+    [ -f "$HOME/.config/brioctl/before-reset" ] || return 1
+    [ -f "$HOME/.config/brioctl/undo" ] || { echo "# the restore left no undo file (rc $rc)"; return 1; }
+}
+
+t_save_flag() {
+    "$BIN" expcomp 140 > /dev/null || return 1
+    [ ! -e "$HOME/.config/brioctl/settings" ] || { echo "# settings written without --save"; return 1; }
+    out=$("$BIN" expcomp +10 --save) || return 1
+    has "output" "$out" "expcomp 150" || return 1
+    has "saved" "$out" "saved " || return 1
+    has "file" "$(cat "$HOME/.config/brioctl/settings")" "expcomp 150" || return 1
+    "$BIN" --save warmth 61 > /dev/null || return 1
+    has "before the command" "$(cat "$HOME/.config/brioctl/settings")" "warmth 61" || return 1
+    "$BIN" undo --save > /dev/null || return 1
+    has "undo --save" "$(cat "$HOME/.config/brioctl/settings")" "warmth 62" || return 1
+    "$BIN" apply neutral --save > /dev/null || return 1
+    # a failed command saves nothing
+    "$BIN" expcomp 140 > /dev/null; cp "$HOME/.config/brioctl/settings" kept
+    "$BIN" expcomp 100 zoom 9999 --save > /dev/null 2>&1; rc=$?
+    expect "failure status" "$rc" 1 || return 1
+    cmp -s kept "$HOME/.config/brioctl/settings" || { echo "# a failed command saved"; return 1; }
+}
+
+t_install_skill() {
+    mkdir -p "$HOME/.claude" bin
+    cp "$BIN" bin/brioctl
+    # nothing next to the binary: the copy built in
+    out=$(bin/brioctl install-skill) || return 1
+    has "claude" "$out" "claude: installed $HOME/.claude/skills/brioctl/SKILL.md (from the copy built into brioctl)" || return 1
+    has "codex skipped" "$out" "codex: skipped" || return 1
+    [ ! -e "$HOME/.codex" ] || { echo "# ~/.codex was created"; return 1; }
+    cmp -s "$HERE/../skills/brioctl/SKILL.md" "$HOME/.claude/skills/brioctl/SKILL.md" || { echo "# built-in copy differs from the source"; return 1; }
+    [ ! -L "$HOME/.claude/skills/brioctl/SKILL.md" ] || return 1
+    # the Homebrew layout wins over the built-in copy
+    mkdir -p share/brioctl/skills/brioctl
+    echo "from share" > share/brioctl/skills/brioctl/SKILL.md
+    out=$(bin/brioctl install-skill --claude) || return 1
+    has "share" "$out" "(from " || return 1
+    expect "share copy" "$(cat "$HOME/.claude/skills/brioctl/SKILL.md")" "from share" || return 1
+    # a source tree: skills/brioctl/SKILL.md next to the binary
+    mkdir -p bin/skills/brioctl
+    echo "from tree" > bin/skills/brioctl/SKILL.md
+    bin/brioctl install-skill --claude > /dev/null || return 1
+    expect "tree copy" "$(cat "$HOME/.claude/skills/brioctl/SKILL.md")" "from tree" || return 1
+    # --codex creates the directory; --all and no flag do both once both exist
+    out=$(bin/brioctl install-skill --codex) || return 1
+    has "codex" "$out" "codex: installed $HOME/.codex/skills/brioctl/SKILL.md" || return 1
+    echo old > "$HOME/.claude/skills/brioctl/SKILL.md"
+    out=$(bin/brioctl install-skill --all) || return 1
+    has "all claude" "$out" "claude: installed" || return 1
+    has "all codex" "$out" "codex: installed" || return 1
+    expect "claude refreshed" "$(cat "$HOME/.claude/skills/brioctl/SKILL.md")" "from tree" || return 1
+    # a link is replaced by a copy, the target is not written through
+    echo keep > target
+    rm "$HOME/.codex/skills/brioctl/SKILL.md"; ln -s "$PWD/target" "$HOME/.codex/skills/brioctl/SKILL.md"
+    bin/brioctl install-skill --codex > /dev/null || return 1
+    [ ! -L "$HOME/.codex/skills/brioctl/SKILL.md" ] || { echo "# still a link"; return 1; }
+    expect "link target untouched" "$(cat target)" keep || return 1
+    # uninstall
+    out=$(bin/brioctl install-skill --uninstall) || return 1
+    has "removed" "$out" "claude: removed" || return 1
+    [ ! -e "$HOME/.claude/skills/brioctl" ] && [ ! -e "$HOME/.codex/skills/brioctl" ] || { echo "# not removed"; return 1; }
+    out=$(bin/brioctl install-skill --uninstall --claude) || return 1
+    has "not installed" "$out" "claude: not installed" || return 1
+    bin/brioctl install-skill --bogus > /dev/null 2>&1; expect "bad flag" "$?" 2 || return 1
+    # no camera is needed
+    env -u BRIOCTL_FAKE bin/brioctl install-skill --claude > /dev/null || return 1
+}
+
+t_install_skill_without_agents() {
+    out=$("$BIN" install-skill) || return 1
+    has "claude" "$out" "claude: skipped" || return 1
+    has "codex" "$out" "codex: skipped" || return 1
+    [ ! -e "$HOME/.claude" ] && [ ! -e "$HOME/.codex" ] || { echo "# directories were created"; return 1; }
+}
+
+t_make_install_puts_the_skill_in_share() {
+    [ -f "$HERE/../Makefile" ] || return 77
+    make -n -C "$HERE/.." install PREFIX=/x > mk 2>&1 || return 77
+    has "skill install" "$(cat mk)" "/x/share/brioctl/skills/brioctl/SKILL.md" || return 1
+}
+
+
 run() {  # run NAME FUNCTION
     N=$((N + 1))
     dir=$ROOT/$N
@@ -2281,6 +2525,20 @@ run "capture: text stats, default file, -N naming, write errors" t_capture_text_
 run "capture --count --size --json" t_capture_json_count_and_size
 run "capture: bad options exit 2, denied access exits 3, unknown camera" t_capture_errors
 run "capture writes no camera register" t_capture_touches_no_register
+run "relative values: +N and -N add to the current value, clamp, mix with absolute ones" t_relative_values
+run "relative values on named controls exit 2 and write nothing" t_relative_values_on_names_exit_2
+run "fov + and fov - step to the next wider or narrower angle" t_fov_steps
+run "a settings file cannot hold a relative value" t_relative_not_from_a_file
+run "--dry-run prints NAME old -> new, as JSON too, and changes nothing" t_dry_run
+run "--dry-run with apply and defaults; refused for commands that cannot plan" t_dry_run_apply_and_defaults
+run "undo puts back the replaced values and undoes itself" t_undo
+run "undo records only real changes and keeps the record through reads and dry runs" t_undo_records_only_changes
+run "undo covers defaults and apply, restores mic last" t_undo_apply_defaults_and_mic_last
+run "factory-reset's restore leaves an undo file" t_undo_after_factory_reset_restore
+run "--save runs save after set, apply and undo, and not after a failure" t_save_flag
+run "install-skill copies from the tree, share or the built-in text; uninstall; links replaced" t_install_skill
+run "install-skill without ~/.claude and ~/.codex creates nothing" t_install_skill_without_agents
+run "make install puts the skill into share/brioctl/skills/brioctl" t_make_install_puts_the_skill_in_share
 
 echo "1..$N"
 if [ "$FAILED" -ne 0 ]; then

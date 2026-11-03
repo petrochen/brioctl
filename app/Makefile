@@ -25,6 +25,7 @@ all: $(APP)
 
 # Always rebuilt: the binary embeds VERSION, which can differ from run to run (make zip VERSION=x).
 cli:
+	$(MAKE) -C .. skill-embedded.h
 	mkdir -p $(BUILD)/cli
 	sed 's|@VERSION@|$(VERSION)|g' ../brioctl-info.plist > $(BUILD)/cli/info.plist
 	$(CC) $(CFLAGS) -DVERSION=\"$(VERSION)\" $(UNIVERSAL) -fobjc-arc -o $(BUILD)/cli/brioctl ../brioctl.c ../capture.m $(LIBS) \

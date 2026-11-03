@@ -17,6 +17,7 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+#include <mach-o/dyld.h>
 #include <sqlite3.h>
 #include <CoreAudio/CoreAudio.h>
 #include <CoreFoundation/CoreFoundation.h>
@@ -28,6 +29,7 @@
 #include <IOKit/hid/IOHIDKeys.h>
 #include <IOKit/usb/IOUSBLib.h>
 #include "capture.h"
+#include "skill-embedded.h"  // SKILL_TEXT: skills/brioctl/SKILL.md, made by the Makefile
 
 #define VID_LOGITECH 0x046d
 #define PID_MXBRIO 0x0944
@@ -885,6 +887,29 @@ static int watching; // watch: what is only set on purpose (privacy) is left alo
 static int written;  // settings really written so far (watch counts them for its log line)
 static int videoOn;  // watch, video just started: mic is never changed (the camera restarts in the middle of a call)
 static int deskOn;   // watch, the camera shows the desk: the firmware sets fov, zoom, pan and tilt itself
+static int dryRun;   // --dry-run: set() reports NAME old -> new and writes nothing
+static int jsonOut;  // --dry-run --json: the plan is printed as JSON at the end
+static int allowRel; // a +N or -N value is accepted: only on the command line, never from a settings file
+static int undoOn;   // the previous values of what is about to change are kept in ~/.config/brioctl/undo
+
+// What --dry-run found, in the order of the command line.
+#define PLAN_MAX 256
+static struct { char name[32], from[32], to[32]; int same; } plan[PLAN_MAX];
+static int planN;
+
+static void planAdd(const char *name, const char *from, const char *to, int same) {
+    if (jsonOut) {}
+    else if (same) printf("%s %s unchanged\n", name, to);
+    else printf("%s %s -> %s\n", name, from, to);
+    if (planN < PLAN_MAX) {
+        snprintf(plan[planN].name, sizeof plan[planN].name, "%s", name);
+        snprintf(plan[planN].from, sizeof plan[planN].from, "%s", from);
+        snprintf(plan[planN].to, sizeof plan[planN].to, "%s", to);
+        plan[planN++].same = same;
+    }
+}
+
+static void undoRecord(const char *name, const char *value);
 
 static int setMicGain(const char *arg) {
     char *end;
@@ -894,8 +919,18 @@ static int setMicGain(const char *arg) {
         fprintf(stderr, "micgain: bad value %s (microphone input volume: 0-1)\n", arg);
         return -1;
     }
-    int same = !micRead(&cur) && (cur > v ? cur - v : v - cur) <= 0.0001f;  // the file keeps 4 decimals
+    int have = !micRead(&cur), same = have && (cur > v ? cur - v : v - cur) <= 0.0001f;  // the file keeps 4 decimals
+    if (dryRun) {
+        char was[32], to[32];
+        snprintf(was, sizeof was, "%.4f", cur);
+        snprintf(to, sizeof to, "%.4f", v);
+        planAdd("micgain", was, to, same);
+        return 0;
+    }
     if (!same) {
+        char was[32];
+        snprintf(was, sizeof was, "%.4f", cur);
+        if (have) undoRecord("micgain", was);
         if (micGain(NULL, &v) || micRead(&cur)) {
             fprintf(stderr, "micgain: no %s microphone in macOS audio devices\n", MIC_NAME);
             return -1;
@@ -1390,8 +1425,26 @@ static int set(Cam *c, const char *name, const char *arg) {
     if (!avail(c, k)) { fprintf(stderr, "%s: control not found on this camera\n", name); return -1; }
 
     char help[192];
-    long raw, len, cur;
-    if (parseValue(c, k, arg, &raw)) {
+    long raw = 0, len, cur, delta = 0;
+    // +N and -N change the current value. A signed control (pan, tilt, roll, brightness, hue) keeps -N as a negative
+    // absolute value: +-N subtracts there. fov takes a bare + or - for the next wider or narrower step.
+    int rel = !k->map && (arg[0] == '+' || (arg[0] == '-' && !k->sgn && arg[1])), fovStep = 0;
+    if (k->map == FOV_MAP && (!strcmp(arg, "+") || !strcmp(arg, "-"))) fovStep = arg[0] == '+' ? 1 : -1;
+    if (k->map && (arg[0] == '+' || arg[0] == '-') && !fovStep) {
+        fprintf(stderr, "%s: + and - only change a number, this control takes names\n", name);
+        return -2;
+    }
+    if ((rel || fovStep) && !allowRel) {
+        fprintf(stderr, "%s: a relative value is only for the command line, not a settings file\n", name);
+        return -1;
+    }
+    if (rel || fovStep) {
+        const char *d = arg + (arg[0] == '+');
+        if (rel && (d[0] == '+' || parseValue(c, k, d, &delta))) {
+            fprintf(stderr, "%s: bad value %s (a number after + or -)\n", name, arg);
+            return -1;
+        }
+    } else if (parseValue(c, k, arg, &raw)) {
         helpText(c, k, help, sizeof help);
         fprintf(stderr, "%s: bad value %s (%s)\n", name, arg, help);
         return -1;
@@ -1415,10 +1468,28 @@ static int set(Cam *c, const char *name, const char *arg) {
     // the control takes.
     Range r;
     getRange(c, k, &r);
+    if (fovStep) {  // the map is ordered 90, 78, 65: a higher register value is narrower
+        long base;
+        if (getField(c, k, GET_CUR, &base)) {
+            fprintf(stderr, "%s: cannot read the current value\n", name);
+            return -1;
+        }
+        raw = base - fovStep;
+        raw = raw < 0 ? 0 : raw > 2 ? 2 : raw;
+    }
     if (!k->map) {
         if (!r.hasMin || !r.hasMax) {
             fprintf(stderr, "%s: range unknown, not writing\n", name);
             return -1;
+        }
+        if (rel) {
+            long base;
+            if (getField(c, k, GET_CUR, &base)) {
+                fprintf(stderr, "%s: cannot read the current value\n", name);
+                return -1;
+            }
+            if (__builtin_add_overflow(base, delta, &raw)) raw = delta < 0 ? r.min : r.max;
+            raw = raw < r.min ? r.min : raw > r.max ? r.max : raw;
         }
         if (raw < r.min || raw > r.max) {
             char rg[32];
@@ -1439,12 +1510,19 @@ static int set(Cam *c, const char *name, const char *arg) {
         fprintf(stderr, "%s: cannot read the current value\n", name);
         return -1;
     }
-    char s[16];
+    char s[16], was[16] = "?";
     formatValue(k, raw, s, sizeof s);
-    if (haveCur && getLE(b + k->off, fieldSize(k), k->sgn) == raw) {  // already set: no write, no flash wear or restart
+    if (haveCur) formatValue(k, getLE(b + k->off, fieldSize(k), k->sgn), was, sizeof was);
+    int same = haveCur && getLE(b + k->off, fieldSize(k), k->sgn) == raw;
+    if (dryRun) {
+        planAdd(k->name, was, s, same);
+        return 0;
+    }
+    if (same) {  // already set: no write, no flash wear or restart
         if (!quiet) printf("%s %s\n", k->name, s);
         return 0;
     }
+    if (haveCur && strncmp(was, "raw ", 4)) undoRecord(k->name, was);  // before the write
     putLE(b + k->off, fieldSize(k), raw);
     IOReturn kr = request(c, SET_CUR, unit, k->sel, b, k->len, NULL);
     if (kr) {
@@ -1479,6 +1557,38 @@ static void makeConfigDir(void) {
     mkdir(p, 0755);  // ~/.config
     *slash = '/';
     mkdir(p, 0755);  // ~/.config/brioctl
+}
+
+// --- undo: the values a command replaced -----------------------------------------------------------------------------
+// Before a write the old value is added to ~/.config/brioctl/undo, a settings file with the newest change first (undo
+// puts them back in the opposite order of the writes, so a gated value is restored before the mode that gates it).
+// The file is rewritten at every change, so a command that stops half way leaves a complete record of what it did.
+#define UNDO_MAX 128
+static char undoName[UNDO_MAX][32], undoVal[UNDO_MAX][32];
+static int undoN, undoFailed;
+static char undoCommand[256] = "brioctl";  // main() puts the command line here for the header
+static char undoCameraLine[96] = "";       // "# camera VID:PID SERIAL"
+
+static void undoRecord(const char *name, const char *value) {
+    if (!undoOn || dryRun || undoN >= UNDO_MAX) return;
+    memmove(undoName + 1, undoName, undoN * sizeof *undoName);
+    memmove(undoVal + 1, undoVal, undoN * sizeof *undoVal);
+    snprintf(undoName[0], sizeof undoName[0], "%s", name);
+    snprintf(undoVal[0], sizeof undoVal[0], "%s", value);
+    undoN++;
+    char path[PATH_MAX], ts[32];
+    configPath("undo", path, sizeof path);
+    makeConfigDir();
+    FILE *f = fopen(path, "w");
+    if (!f) {
+        if (!undoFailed++) fprintf(stderr, "warning: cannot write %s, this change cannot be undone\n", path);
+        return;
+    }
+    time_t t = time(NULL);
+    strftime(ts, sizeof ts, "%Y-%m-%d %H:%M:%S", localtime(&t));
+    fprintf(f, "# brioctl undo, %s, %s\n%s\n", ts, undoCommand, undoCameraLine);
+    for (int i = 0; i < undoN; i++) fprintf(f, "%s %s\n", undoName[i], undoVal[i]);
+    fclose(f);
 }
 
 static const char *presetSettings(const char *name) {
@@ -1603,6 +1713,25 @@ static int apply(Cam *c, const char *name) {
     if (!f) { fprintf(stderr, "no settings file %s and no preset %s\n", path, name); return 1; }
     int rc = applyStream(c, f);
     fclose(f);
+    return rc;
+}
+
+// Put back what the last changing command replaced. What this replaces is kept the same way, so undo undoes itself.
+static int undoCmd(Cam *c) {
+    char path[PATH_MAX], *buf = malloc(65536);
+    configPath("undo", path, sizeof path);
+    FILE *f = fopen(path, "r");
+    if (!f || !buf) {
+        fprintf(stderr, "nothing to undo (no %s)\n", path);
+        free(buf);
+        return 1;
+    }
+    size_t n = fread(buf, 1, 65535, f);
+    fclose(f);
+    FILE *m = fmemopen(buf, n, "r");  // read before anything is written: undo rewrites the file as it goes
+    int rc = m ? applyStream(c, m) : 1;
+    if (m) fclose(m);
+    free(buf);
     return rc;
 }
 
@@ -2599,6 +2728,12 @@ static void usage(FILE *f) {
                "       brioctl --json              the same as one JSON object, for scripts\n"
                "       brioctl get NAME            print one value only (settings and micgain), exit 1 if unreadable\n"
                "       brioctl NAME VALUE ...      change settings, e.g. brioctl fov 78 flicker 50 hdr on\n"
+               "                                   +N / -N change a number by N (expcomp +10), fov + / fov - step it\n"
+               "       brioctl undo                put back what the last changing command replaced\n"
+               "       --dry-run [--json]          with NAME VALUE, apply, defaults, undo: print NAME old -> new, write nothing\n"
+               "       --save                      with NAME VALUE, apply, defaults, undo: then run 'brioctl save'\n"
+               "       brioctl install-skill [--claude|--codex|--all] [--uninstall]\n"
+               "                                   copy the AI agent skill into ~/.claude/skills and ~/.codex/skills\n"
                "       brioctl save [FILE]         save current settings (default ~/.config/brioctl/settings)\n"
                "       brioctl apply [FILE|PRESET] apply saved settings or a built-in preset\n"
                "       brioctl profiles [--json]   list presets and saved files\n"
@@ -3193,11 +3328,106 @@ static int importCmd(int argc, char **argv) {
     return 0;
 }
 
+// --- install-skill: the Claude Code / Codex skill, copied (not linked) into the agent's skills directory --------------
+// The text comes from skills/brioctl/SKILL.md next to the binary (a source tree), else from ../share/brioctl/skills/
+// brioctl/SKILL.md (Homebrew, make install), else from the copy built into the binary.
+static char *slurp(const char *path, size_t *len) {
+    FILE *f = fopen(path, "r");
+    if (!f) return NULL;
+    size_t cap = 1 << 16, n = 0, got;
+    char *buf = malloc(cap);
+    while (buf && (got = fread(buf + n, 1, cap - n, f)) > 0) {
+        n += got;
+        if (n == cap && !(buf = realloc(buf, cap *= 2))) break;
+    }
+    fclose(f);
+    if (buf) *len = n;
+    return buf;
+}
+
+static char *skillText(size_t *len, char *from, size_t fromN) {
+    char exe[PATH_MAX], real[PATH_MAX], cand[PATH_MAX];
+    uint32_t sz = sizeof exe;
+    static const char *const WHERE[] = {"%s/skills/brioctl/SKILL.md", "%s/../share/brioctl/skills/brioctl/SKILL.md"};
+    if (!_NSGetExecutablePath(exe, &sz) && realpath(exe, real)) {
+        char *slash = strrchr(real, '/');
+        if (slash) *slash = 0;
+        for (int i = 0; i < 2; i++) {
+            snprintf(cand, sizeof cand, WHERE[i], real);
+            char *t = slurp(cand, len);
+            if (t && *len) { snprintf(from, fromN, "%s", cand); return t; }
+            free(t);
+        }
+    }
+    snprintf(from, fromN, "the copy built into brioctl");
+    *len = strlen(SKILL_TEXT);
+    return strdup(SKILL_TEXT);
+}
+
+static int installSkillCmd(int argc, char **argv) {
+    int claude = 0, codex = 0, uninstall = 0;
+    for (int i = 2; i < argc; i++) {
+        if (!strcmp(argv[i], "--claude")) claude = 1;
+        else if (!strcmp(argv[i], "--codex")) codex = 1;
+        else if (!strcmp(argv[i], "--all")) claude = codex = 2;
+        else if (!strcmp(argv[i], "--uninstall")) uninstall = 1;
+        else { usage(stderr); return 2; }
+    }
+    const char *home = getenv("HOME");
+    if (!home || !*home) { fprintf(stderr, "install-skill: HOME is not set\n"); return 1; }
+    int implicit = !claude && !codex;  // no flag: --all
+    if (implicit) claude = codex = 2;
+    size_t len = 0;
+    char from[PATH_MAX], *text = uninstall ? NULL : skillText(&len, from, sizeof from);
+    if (!uninstall && !text) { fprintf(stderr, "install-skill: out of memory\n"); return 1; }
+    int rc = 0;
+    for (int t = 0; t < 2; t++) {
+        const char *tool = t ? "codex" : "claude", *dot = t ? ".codex" : ".claude";
+        int mode = t ? codex : claude;  // 2: only if the tool's directory exists
+        if (!mode) continue;
+        char top[PATH_MAX], dir[PATH_MAX], file[PATH_MAX];
+        struct stat st;
+        snprintf(top, sizeof top, "%s/%s", home, dot);
+        snprintf(dir, sizeof dir, "%s/skills/brioctl", top);
+        snprintf(file, sizeof file, "%s/SKILL.md", dir);
+        if (mode == 2 && (stat(top, &st) || !S_ISDIR(st.st_mode))) {
+            printf("%s: skipped, %s does not exist (--%s creates it)\n", tool, top, tool);
+            continue;
+        }
+        if (uninstall) {
+            if (unlink(file)) printf("%s: not installed (%s)\n", tool, file);
+            else { rmdir(dir); printf("%s: removed %s\n", tool, file); }
+            continue;
+        }
+        char step[PATH_MAX];
+        snprintf(step, sizeof step, "%s", top);
+        mkdir(step, 0755);
+        snprintf(step, sizeof step, "%s/skills", top);
+        mkdir(step, 0755);
+        mkdir(dir, 0755);
+        unlink(file);  // a copy, even where a link was: never write through it
+        FILE *f = fopen(file, "w");
+        if (!f || fwrite(text, 1, len, f) != len || fclose(f)) {
+            fprintf(stderr, "%s: cannot write %s: %s\n", tool, file, strerror(errno));
+            rc = 1;
+        } else printf("%s: installed %s (from %s)\n", tool, file, from);
+    }
+    free(text);
+    return rc;
+}
+
 int main(int argc, char **argv) {
     const char *camId = NULL;  // --camera ID may stand anywhere; take it out
-    int n = 1;
+    int n = 1, doSave = 0;
+    size_t used = snprintf(undoCommand, sizeof undoCommand, "brioctl");
+    for (int i = 1; i < argc && used < sizeof undoCommand; i++)
+        used += snprintf(undoCommand + used, sizeof undoCommand - used, " %s", argv[i]);
+    // import has its own --save NAME; --dry-run and --save stand anywhere in the other commands
+    int own = argc > 1 && !strcmp(argv[1], "import");
     for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--camera")) {
+        if (!own && !strcmp(argv[i], "--dry-run")) dryRun = 1;
+        else if (!own && !strcmp(argv[i], "--save")) doSave = 1;
+        else if (!strcmp(argv[i], "--camera")) {
             if (++i == argc) { usage(stderr); return 2; }
             camId = argv[i];
         } else if (!strncmp(argv[i], "--camera=", 9)) camId = argv[i] + 9;
@@ -3205,8 +3435,42 @@ int main(int argc, char **argv) {
     }
     argv[argc = n] = NULL;
 
+    if (dryRun && argc > 2 && !strcmp(argv[1], "--json")) {  // --dry-run --json fov 78
+        jsonOut = 1;
+        for (int i = 1; i < argc; i++) argv[i] = argv[i + 1];
+        argc--;
+    }
     const char *cmd = argc > 1 ? argv[1] : "show";
+    static const char *const OTHER[] = {"show", "dump", "save", "defaults", "factory-reset", "--json", "snapshot",
+                                        "get", "describe", "list", "profiles", "import", "capture", "watch", "help",
+                                        "-h", "--help", "version", "--version", "install-skill"};
+    int isSetCmd = 1;  // NAME VALUE ...
+    for (size_t i = 0; i < sizeof OTHER / sizeof *OTHER; i++)
+        if (!strcmp(cmd, OTHER[i])) isSetCmd = 0;
+    int changes = isSetCmd || !strcmp(cmd, "apply") || !strcmp(cmd, "undo") || !strcmp(cmd, "defaults");
+    if (dryRun && (!strcmp(cmd, "watch") || !strcmp(cmd, "factory-reset") || !strcmp(cmd, "save") ||
+                   !strcmp(cmd, "snapshot") || !strcmp(cmd, "capture") || !strcmp(cmd, "install-skill"))) {
+        fprintf(stderr, "--dry-run: not available for %s\n", cmd);
+        return 2;
+    }
+    if (doSave && !(isSetCmd || !strcmp(cmd, "apply") || !strcmp(cmd, "undo") || !strcmp(cmd, "defaults"))) {
+        fprintf(stderr, "--save: only for setting values, apply, defaults and undo\n");
+        return 2;
+    }
+    if (dryRun && doSave) {
+        fprintf(stderr, "--save: nothing is written by --dry-run\n");
+        return 2;
+    }
+    if (dryRun && changes) {  // brioctl fov 78 --dry-run --json
+        int m = 1;
+        for (int i = 1; i < argc; i++) {
+            if (!strcmp(argv[i], "--json") && i > 1) jsonOut = 1;
+            else argv[m++] = argv[i];
+        }
+        argv[argc = m] = NULL;
+    }
     const char *arg = argc > 2 ? argv[2] : NULL;
+    if (!strcmp(cmd, "install-skill")) return installSkillCmd(argc, argv);
     if (!strcmp(cmd, "-h") || !strcmp(cmd, "--help") || !strcmp(cmd, "help")) {
         usage(stdout);
         return 0;
@@ -3265,7 +3529,7 @@ int main(int argc, char **argv) {
     if (!strcmp(cmd, "describe") && arg && strcmp(arg, "--json")) { usage(stderr); return 2; }
 
     static const char *const COMMANDS[] = {"show", "dump", "save", "apply", "defaults", "factory-reset", "--json",
-                                           "snapshot", "get", "describe"};
+                                           "snapshot", "get", "describe", "undo"};
     int isCommand = 0;
     for (size_t i = 0; i < sizeof COMMANDS / sizeof *COMMANDS; i++)
         if (!strcmp(cmd, COMMANDS[i])) isCommand = 1;
@@ -3274,6 +3538,9 @@ int main(int argc, char **argv) {
     if ((rc = selectCamera(camId))) return rc;
     Cam c;
     if (openCam(&c)) return 1;
+    snprintf(undoCameraLine, sizeof undoCameraLine, "# camera %04x:%04x%s%s", c.info.vid, c.info.pid,
+             c.info.serial[0] ? " " : "", c.info.serial);
+    undoOn = changes || !strcmp(cmd, "factory-reset");
     if (!strcmp(cmd, "show")) rc = show(&c);
     else if (!strcmp(cmd, "--json")) rc = showJson(&c);
     else if (!strcmp(cmd, "get")) rc = get(&c, arg);
@@ -3282,12 +3549,33 @@ int main(int argc, char **argv) {
     else if (!strcmp(cmd, "dump")) rc = dump(&c);
     else if (!strcmp(cmd, "save")) rc = save(&c, arg ? arg : "settings");
     else if (!strcmp(cmd, "apply")) rc = apply(&c, arg ? arg : "settings");
+    else if (!strcmp(cmd, "undo")) rc = undoCmd(&c);
     else if (!strcmp(cmd, "defaults")) rc = defaults(&c);
     else if (!strcmp(cmd, "factory-reset")) rc = factoryReset(&c, arg && !strcmp(arg, "--yes"));
-    else
+    else {
+        allowRel = 1;
         for (int last = 0; last < 2; last++)
             for (int i = 1; i + 1 < argc; i += 2)
-                if (setLast(argv[i]) == last && set(&c, argv[i], argv[i + 1])) rc = 1;
+                if (setLast(argv[i]) == last) {
+                    int r = set(&c, argv[i], argv[i + 1]);
+                    if (r) rc = rc == 2 || r == -2 ? 2 : 1;
+                }
+        allowRel = 0;
+    }
+    if (jsonOut) {
+        printf("{\"changes\":[");
+        for (int i = 0; i < planN; i++) {
+            printf("%s{\"name\":", i ? "," : "");
+            jstr(plan[i].name);
+            printf(",\"from\":");
+            jstr(plan[i].from);
+            printf(",\"to\":");
+            jstr(plan[i].to);
+            printf(",\"unchanged\":%s}", plan[i].same ? "true" : "false");
+        }
+        printf("]}\n");
+    }
+    if (doSave && !rc) rc = save(&c, "settings");
     if (closeCam(&c)) rc = 1;
     return rc;
 }
