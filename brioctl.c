@@ -2667,7 +2667,7 @@ static void faceAverage(const struct capture_face *f, int n, struct capture_face
 
 static int captureUsage(void) {
     fprintf(stderr, "usage: brioctl capture [-o PATH] [--count N] [--interval SEC] [--wait SEC] [--size WxH] "
-                    "[--stats] [--json] [--no-face]\n");
+                    "[--stats] [--json]\n");
     return 2;
 }
 
@@ -2687,7 +2687,6 @@ static int captureCmd(int argc, char **argv, const char *camId) {
     for (int i = 2; i < argc; i++) {
         const char *a = argv[i], *v = i + 1 < argc ? argv[i + 1] : NULL;
         if (!strcmp(a, "--stats")) stats = 1;
-        else if (!strcmp(a, "--no-face")) o.no_face = 1;
         else if (!strcmp(a, "--json")) json = 1;
         else if (!v) return captureUsage();
         else if (!strcmp(a, "-o") || !strcmp(a, "--output")) o.path = argv[++i];
@@ -2762,7 +2761,7 @@ static int captureCmd(int argc, char **argv, const char *camId) {
             if (stats) {
                 if (r.n > 1) printf("frame %d\n", i + 1);
                 statsText(&r.stats[i], "  ", 1);
-                if (!o.no_face) faceText(&r.face[i], "  ");
+                faceText(&r.face[i], "  ");
             }
         }
         if (stats && r.n > 1) {
@@ -2770,11 +2769,9 @@ static int captureCmd(int argc, char **argv, const char *camId) {
             statsAverage(r.stats, r.n, &avg);
             printf("average\n");
             statsText(&avg, "  ", 1);
-            if (!o.no_face) {
-                struct capture_face favg;
-                faceAverage(r.face, r.n, &favg);
-                faceText(&favg, "  ");
-            }
+            struct capture_face favg;
+            faceAverage(r.face, r.n, &favg);
+            faceText(&favg, "  ");
         }
     }
     return rc;
@@ -2787,9 +2784,9 @@ static int captureCmd(int argc, char **argv, const char *camId) {
 // The numbers of the rules, in one place (docs: README "Automatic adjustment").
 #define AUTO_Y_FACE_LO 105.0     // face y_mean target
 #define AUTO_Y_FACE_HI 140.0
-#define AUTO_Y_FRAME_LO 90.0     // frame y_mean target (--target frame, or no face found)
+#define AUTO_Y_FRAME_LO 90.0     // frame y_mean target (no face found)
 #define AUTO_Y_FRAME_HI 140.0
-#define AUTO_EXP_STEP 12         // expcomp per step
+#define AUTO_EXP_STEP 10         // expcomp per step
 #define AUTO_EXP_SHADOW_STEP 8   // expcomp when the shadows are clipped
 #define AUTO_EXP_MIN 96          // safety band: auto never writes outside it
 #define AUTO_EXP_MAX 176
@@ -2797,14 +2794,18 @@ static int captureCmd(int argc, char **argv, const char *camId) {
 #define AUTO_CLIP_LOW 5.0        // % of the judged area below Y 16 that asks for light
 #define AUTO_WB_HI 1.12          // r/b above this is too warm
 #define AUTO_WB_LO 0.90          // and below this too cool
-#define AUTO_WARMTH_STEP 6
+#define AUTO_WARMTH_STEP 4
 #define AUTO_WARMTH_MIN 30       // safety band
 #define AUTO_WARMTH_MAX 70
 #define AUTO_KELVIN_STEP 300     // wb when awb is off
 #define AUTO_FACE_SMALL 0.04     // face_fraction below this: suggest framing
 #define AUTO_ZOOM_STEP 25
 #define AUTO_SHARP_DROP 0.5      // sharpness below this share of the first frame: note about focus
-#define AUTO_MAX_STEPS_LIMIT 10
+#define AUTO_MAX_STEPS 4
+#define AUTO_SETTLE 2.0          // seconds to wait after a change before measuring (3.5 after framing)
+#define AUTO_SETTLE_FRAMING 3.5
+#define AUTO_FRAMES 2            // a measurement is the average of this many frames,
+#define AUTO_FRAME_GAP 0.5       // this many seconds apart
 
 typedef struct {  // what one capture says
     struct capture_stats ev, frame;  // ev: the face box (face = 1) or the whole frame
@@ -2959,10 +2960,10 @@ static void ruleFocus(const AutoCtx *x, AutoPlan *p) {
 
 // The whole rule set, tried in this order; one control is changed once per step (the first rule that asks wins).
 static const struct { const char *id, *when, *does; void (*fire)(const AutoCtx *, AutoPlan *); } AUTO_RULES[] = {
-    {"exposure", "y_mean outside 105-140 (face) or 90-140 (frame)", "expcomp +/-12, kept in 96-176", ruleExposure},
+    {"exposure", "y_mean outside 105-140 (face) or 90-140 (frame)", "expcomp +/-10, kept in 96-176", ruleExposure},
     {"highlights", "frame clip_high_pct > 3 and y_mean in range", "hdr on (once); with hdr on, a note", ruleHighlights},
     {"shadows", "clip_low_pct > 5 and y_mean <= 140", "hdr on, else expcomp +8 (kept in 96-176)", ruleShadows},
-    {"white_balance", "wb_bias > 1.12 or < 0.90", "awb on: warmth -/+6 (30-70); awb off: wb -/+300 K", ruleWhiteBalance},
+    {"white_balance", "wb_bias > 1.12 or < 0.90", "awb on: warmth -/+4 (30-70); awb off: wb -/+300 K", ruleWhiteBalance},
     {"framing", "face_fraction < 0.04", "note; with --framing fov - (else zoom +25)", ruleFraming},
     {"focus", "sharpness < 50% of the first frame", "note only", ruleFocus},
 };
@@ -3012,22 +3013,26 @@ static void captureState(Cam *c, struct capture_opts *o) {
     if (!autoStr(c, "hdr", s)) o->hdr = !strcmp(s, "on");
 }
 
-// One frame, judged on the face when --target face finds one. Returns the status of capture.
-static int autoShoot(Cam *c, const char *path, double wait, int wantFace, AutoShot *out) {
+// One measurement: AUTO_FRAMES frames AUTO_FRAME_GAP apart, averaged, after waiting `wait` seconds; judged on the face
+// when one is found. Returns the status of capture.
+static int autoShoot(Cam *c, const char *path, double wait, AutoShot *out) {
     static struct capture_result r;
-    struct capture_opts o = {.path = path, .count = 1, .wait = wait, .no_face = !wantFace};
+    struct capture_opts o = {.path = path, .count = AUTO_FRAMES, .interval = AUTO_FRAME_GAP, .wait = wait};
     o.vid = target.vid, o.pid = target.pid, o.loc = target.loc;
     captureState(c, &o);
     int rc = brioctl_capture(&o, &r);
-    if (rc || r.n < 1) {
+    if (rc || r.n < AUTO_FRAMES) {
         fprintf(stderr, "%s\n", r.error[0] ? r.error : "capture failed");
         return rc ? rc : 1;
     }
+    struct capture_face fa;
     memset(out, 0, sizeof *out);
-    out->frame = r.stats[0];
-    out->face = r.face[0].faces > 0;
-    out->ev = out->face ? r.face[0].stats : r.stats[0];
-    out->fraction = r.face[0].fraction, out->cx = r.face[0].cx, out->cy = r.face[0].cy;
+    for (int i = 0; i < r.n; i++) unlink(r.path[i]);
+    statsAverage(r.stats, r.n, &out->frame);
+    faceAverage(r.face, r.n, &fa);
+    out->face = fa.faces > 0;
+    out->ev = out->face ? fa.stats : out->frame;
+    out->fraction = fa.fraction, out->cx = fa.cx, out->cy = fa.cy;
     return 0;
 }
 
@@ -3059,57 +3064,52 @@ static void autoShotText(const char *label, const AutoShot *s) {
 }
 
 static int autoUsage(void) {
-    fprintf(stderr, "usage: brioctl auto [--target face|frame] [--dry-run] [--save] [--max-steps N] [--json] "
-                    "[--framing] [--wait SEC]\n");
+    fprintf(stderr, "usage: brioctl auto [--dry-run] [--save] [--json] [--framing]\n");
     return 2;
 }
 
+// Values a control has had in this run (its value before the run included): auto never moves one back to such a value.
+typedef struct { char name[16], val[16]; } AutoSeen;
+
+static int autoSeen(const AutoSeen *h, int n, const char *name, const char *val) {
+    for (int i = 0; i < n; i++)
+        if (!strcmp(h[i].name, name) && !strcmp(h[i].val, val)) return 1;
+    return 0;
+}
+
+static void autoRemember(AutoSeen *h, int *n, const char *name, const char *val) {
+    if (*n < 64 && !autoSeen(h, *n, name, val)) {
+        snprintf(h[*n].name, sizeof h[*n].name, "%s", name);
+        snprintf(h[*n].val, sizeof h[*n].val, "%s", val);
+        (*n)++;
+    }
+}
+
 static int autoCmd(Cam *c, int argc, char **argv, int doSave) {
-    int wantFace = 1, maxSteps = 4, json = 0, framing = 0;
-    double wait = 1.0;
+    int json = 0, framing = 0;
     for (int i = 2; i < argc; i++) {
-        const char *a = argv[i], *v = i + 1 < argc ? argv[i + 1] : NULL;
-        if (!strcmp(a, "--json")) json = 1;
-        else if (!strcmp(a, "--framing")) framing = 1;
-        else if (!v) return autoUsage();
-        else if (!strcmp(a, "--target")) {
-            if (!strcmp(v, "face")) wantFace = 1;
-            else if (!strcmp(v, "frame")) wantFace = 0;
-            else return autoUsage();
-            i++;
-        } else if (!strcmp(a, "--max-steps")) {
-            char *end;
-            long n = strtol(v, &end, 10);
-            if (!*v || *end || n < 1 || n > AUTO_MAX_STEPS_LIMIT) {
-                fprintf(stderr, "--max-steps takes a number from 1 to %d\n", AUTO_MAX_STEPS_LIMIT);
-                return 2;
-            }
-            maxSteps = (int)n;
-            i++;
-        } else if (!strcmp(a, "--wait")) {
-            if (parseSeconds(v, &wait)) {
-                fprintf(stderr, "--wait takes a number of seconds (0 to 3600)\n");
-                return 2;
-            }
-            i++;
-        } else return autoUsage();
+        if (!strcmp(argv[i], "--json")) json = 1;
+        else if (!strcmp(argv[i], "--framing")) framing = 1;
+        else return autoUsage();
     }
     char path[PATH_MAX];
     const char *tmp = getenv("TMPDIR");
     snprintf(path, sizeof path, "%s/brioctl-auto-%d.jpg", tmp && *tmp ? tmp : "/tmp", (int)getpid());
 
-    AutoShot before, now, shots[AUTO_MAX_STEPS_LIMIT];
-    AutoPlan plan, plans[AUTO_MAX_STEPS_LIMIT];
+    AutoShot before, now, shots[AUTO_MAX_STEPS];
+    AutoPlan plan, plans[AUTO_MAX_STEPS];
+    AutoSeen seen[64];
+    int nseen = 0;
     AutoCtx x = {.framing = framing};
     int nsteps = 0, rc = 0, ntouched = 0, nrecs = 0;
     const char *stopped = "max_steps";
     char noteFace[160] = "", touched[8][16], recs[16][200];
-    double prevScore = 0, lastWait = wait;
+    double prevScore = 0, lastWait = AUTO_SETTLE;
     int framingOnly = 0;  // the last step only changed the framing, which the score does not see
 
-    if ((rc = autoShoot(c, path, lastWait, wantFace, &now))) { unlink(path); return rc; }
+    if ((rc = autoShoot(c, path, lastWait, &now))) { unlink(path); return rc; }
     before = now;
-    if (wantFace && !now.face) snprintf(noteFace, sizeof noteFace, "no face found: judged on the whole frame");
+    if (!now.face) snprintf(noteFace, sizeof noteFace, "no face found: judged on the whole frame");
     for (int step = 1;; step++) {
         autoRead(c, &x);
         x.s = now, x.step = step;
@@ -3122,7 +3122,14 @@ static int autoCmd(Cam *c, int argc, char **argv, int doSave) {
         }
         if (!plan.n) { stopped = "in_range"; break; }
         if (step > 1 && !framingOnly && autoScore(&now) >= prevScore - 0.01) { stopped = "no_improvement"; break; }
-        if (step > maxSteps) { stopped = "max_steps"; break; }
+        if (step > AUTO_MAX_STEPS) { stopped = "max_steps"; break; }
+        int back = 0;  // would a control go back to a value it already had in this run?
+        for (int i = 0; i < plan.n; i++) {
+            const AutoChange *ch = &plan.ch[i];
+            autoRemember(seen, &nseen, ch->name, ch->from);
+            back |= autoSeen(seen, nseen, ch->name, ch->to);
+        }
+        if (back) { stopped = "oscillating"; break; }
         shots[nsteps] = now, plans[nsteps++] = plan;
         if (dryRun) { stopped = "dry_run"; break; }
         prevScore = autoScore(&now);
@@ -3138,14 +3145,15 @@ static int autoCmd(Cam *c, int argc, char **argv, int doSave) {
             int fr = !strcmp(ch->name, "zoom") || !strcmp(ch->name, "fov");
             framed |= fr, other |= !fr;
             if (!autoStr(c, ch->name, cur)) snprintf(plans[nsteps - 1].ch[i].to, sizeof ch->to, "%s", cur);
+            autoRemember(seen, &nseen, ch->name, plans[nsteps - 1].ch[i].to);
             int seen = 0;
             for (int j = 0; j < ntouched; j++) seen |= !strcmp(touched[j], ch->name);
             if (!seen && ntouched < 8) snprintf(touched[ntouched++], sizeof touched[0], "%s", ch->name);
         }
         if (!ok) { stopped = "no_improvement"; break; }
         framingOnly = framed && !other;
-        lastWait = framed && wait < 3.5 ? 3.5 : wait;  // a new framing needs the camera longer to settle
-        if ((rc = autoShoot(c, path, lastWait, wantFace, &now))) break;
+        lastWait = framed ? AUTO_SETTLE_FRAMING : AUTO_SETTLE;  // a new framing needs the camera longer to settle
+        if ((rc = autoShoot(c, path, lastWait, &now))) break;
     }
     unlink(path);
     if (rc) return rc;
@@ -3162,7 +3170,7 @@ static int autoCmd(Cam *c, int argc, char **argv, int doSave) {
     }
     int changed = !dryRun && ntouched;
     if (json) {
-        printf("{\"target\":\"%s\",\"dry_run\":%s,\"steps\":[", wantFace ? "face" : "frame", dryRun ? "true" : "false");
+        printf("{\"dry_run\":%s,\"steps\":[", dryRun ? "true" : "false");
         for (int s = 0; s < nsteps; s++) {
             printf("%s{\"step\":%d,\"stats\":", s ? "," : "", s + 1);
             autoShotJson(&shots[s]);
@@ -3230,7 +3238,7 @@ static void usage(FILE *f) {
                "       brioctl undo                put back what the last changing command replaced\n"
                "       --dry-run [--json]          with NAME VALUE, apply, defaults, undo: print NAME old -> new, write nothing\n"
                "       --save                      with NAME VALUE, apply, defaults, undo: then run 'brioctl save'\n"
-               "       brioctl install-skill [--claude|--codex|--all] [--uninstall]\n"
+               "       brioctl install-skill [--uninstall]\n"
                "                                   copy the AI agent skill into ~/.claude/skills and ~/.codex/skills\n"
                "       brioctl save [FILE]         save current settings (default ~/.config/brioctl/settings)\n"
                "       brioctl apply [FILE|PRESET] apply saved settings or a built-in preset\n"
@@ -3241,9 +3249,9 @@ static void usage(FILE *f) {
                "       brioctl watch [FILE]        apply FILE now, when the camera is connected and when video starts\n"
                "       brioctl factory-reset --yes restart the MX Brio with factory settings, then restore yours\n"
                "       brioctl describe [--json]   what every control means, its range, settle time, risk; read-only\n"
-               "       brioctl capture [-o PATH] [--count N] [--interval SEC] [--wait SEC] [--size WxH] [--stats] [--json] [--no-face]\n"
+               "       brioctl capture [-o PATH] [--count N] [--interval SEC] [--wait SEC] [--size WxH] [--stats] [--json]\n"
                "                                   JPEG frames from the camera (macOS asks for camera access), with picture stats\n"
-               "       brioctl auto [--target face|frame] [--dry-run] [--save] [--max-steps N] [--json] [--framing]\n"
+               "       brioctl auto [--dry-run] [--save] [--json] [--framing]\n"
                "                                   measure the picture, nudge expcomp/hdr/warmth, measure again (undo undoes it)\n"
                "       brioctl dump                list all UVC units and extension controls (read-only)\n"
                "       brioctl snapshot [FILE]     write every register brioctl reads, serial masked (read-only)\n"
@@ -3865,43 +3873,32 @@ static char *skillText(size_t *len, char *from, size_t fromN) {
 }
 
 static int installSkillCmd(int argc, char **argv) {
-    int claude = 0, codex = 0, uninstall = 0;
+    int uninstall = 0;
     for (int i = 2; i < argc; i++) {
-        if (!strcmp(argv[i], "--claude")) claude = 1;
-        else if (!strcmp(argv[i], "--codex")) codex = 1;
-        else if (!strcmp(argv[i], "--all")) claude = codex = 2;
-        else if (!strcmp(argv[i], "--uninstall")) uninstall = 1;
+        if (!strcmp(argv[i], "--uninstall")) uninstall = 1;
         else { usage(stderr); return 2; }
     }
     const char *home = getenv("HOME");
     if (!home || !*home) { fprintf(stderr, "install-skill: HOME is not set\n"); return 1; }
-    int implicit = !claude && !codex;  // no flag: --all
-    if (implicit) claude = codex = 2;
     size_t len = 0;
     char from[PATH_MAX], *text = uninstall ? NULL : skillText(&len, from, sizeof from);
     if (!uninstall && !text) { fprintf(stderr, "install-skill: out of memory\n"); return 1; }
-    int rc = 0;
-    for (int t = 0; t < 2; t++) {
+    int rc = 0, found = 0;
+    for (int t = 0; t < 2; t++) {  // every agent whose directory exists
         const char *tool = t ? "codex" : "claude", *dot = t ? ".codex" : ".claude";
-        int mode = t ? codex : claude;  // 2: only if the tool's directory exists
-        if (!mode) continue;
         char top[PATH_MAX], dir[PATH_MAX], file[PATH_MAX];
         struct stat st;
         snprintf(top, sizeof top, "%s/%s", home, dot);
         snprintf(dir, sizeof dir, "%s/skills/brioctl", top);
         snprintf(file, sizeof file, "%s/SKILL.md", dir);
-        if (mode == 2 && (stat(top, &st) || !S_ISDIR(st.st_mode))) {
-            printf("%s: skipped, %s does not exist (--%s creates it)\n", tool, top, tool);
-            continue;
-        }
+        if (stat(top, &st) || !S_ISDIR(st.st_mode)) continue;
+        found++;
         if (uninstall) {
             if (unlink(file)) printf("%s: not installed (%s)\n", tool, file);
             else { rmdir(dir); printf("%s: removed %s\n", tool, file); }
             continue;
         }
         char step[PATH_MAX];
-        snprintf(step, sizeof step, "%s", top);
-        mkdir(step, 0755);
         snprintf(step, sizeof step, "%s/skills", top);
         mkdir(step, 0755);
         mkdir(dir, 0755);
@@ -3912,6 +3909,7 @@ static int installSkillCmd(int argc, char **argv) {
             rc = 1;
         } else printf("%s: installed %s (from %s)\n", tool, file, from);
     }
+    if (!found) printf("no ~/.claude or ~/.codex directory: nothing to do\n");
     free(text);
     return rc;
 }
@@ -4039,8 +4037,8 @@ int main(int argc, char **argv) {
     if ((rc = selectCamera(camId))) return rc;
     Cam c;
     if (openCam(&c)) return 1;
-    snprintf(undoCameraLine, sizeof undoCameraLine, "# camera %04x:%04x%s%s", c.info.vid, c.info.pid,
-             c.info.serial[0] ? " " : "", c.info.serial);
+    snprintf(undoCameraLine, sizeof undoCameraLine, "# camera %04x:%04x%s", c.info.vid, c.info.pid,
+             c.info.serial[0] ? " ****" : "");  // the serial is masked, as in a snapshot
     undoOn = changes || isAuto || !strcmp(cmd, "factory-reset");
     if (!strcmp(cmd, "show")) rc = show(&c);
     else if (!strcmp(cmd, "--json")) rc = showJson(&c);

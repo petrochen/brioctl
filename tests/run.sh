@@ -2188,13 +2188,11 @@ PY
     out=$("$BIN" capture --stats 2>&1)
     has "face block" "$out" "face_fraction" || return 1
     has "face block" "$out" "faces" || return 1
-    "$BIN" capture --json --no-face > out.json || return 1
-    python3 -I -c 'import json; d = json.load(open("out.json")); assert d["frames"][0]["face"] is None and d["avg"]["face"] is None' || return 1
     BRIOCTL_FAKE_CAPTURE_NOFACE=1 "$BIN" capture --json > out.json || return 1
     python3 -I -c 'import json; d = json.load(open("out.json")); assert d["frames"][0]["face"] is None and d["avg"]["face"] is None' || return 1
     out=$(BRIOCTL_FAKE_CAPTURE_NOFACE=1 "$BIN" capture --stats 2>&1)
     has "no face" "$out" "face            none" || return 1
-    hasnt "--no-face text" "$("$BIN" capture --stats --no-face 2>&1)" "face_fraction"
+    "$BIN" capture --no-face > out 2>&1; expect "--no-face is gone" "$?" 2
 }
 
 # autoj ARGS...: run brioctl auto --json ARGS into auto.json
@@ -2210,17 +2208,17 @@ t_auto_converges_and_undoes() {
     python3 -I - auto.json <<'PY' || return 1
 import json, sys
 d = json.load(open(sys.argv[1]))
-assert set(d) == {"target", "dry_run", "steps", "before", "after", "applied", "recommendations", "note", "saved",
+assert set(d) == {"dry_run", "steps", "before", "after", "applied", "recommendations", "note", "saved",
                   "stopped"}, sorted(d)
-assert d["target"] == "face" and d["dry_run"] is False and d["stopped"] == "in_range" and d["note"] is None
+assert d["dry_run"] is False and d["stopped"] == "in_range" and d["note"] is None
 assert 1 <= len(d["steps"]) <= 4
 s = d["steps"][0]
 assert s["step"] == 1 and s["stats"]["judged"] == "face" and s["stats"]["y_mean"] < 105 and s["stats"]["wb_bias"] > 1.12
 names = [c["name"] for c in s["changes"]]
 assert names == ["expcomp", "warmth"], names
 c = s["changes"][0]
-assert set(c) == {"name", "from", "to", "why"} and c["from"] == "128" and c["to"] == "140"
-assert s["changes"][1]["from"] == "62" and s["changes"][1]["to"] == "56"
+assert set(c) == {"name", "from", "to", "why"} and c["from"] == "128" and c["to"] == "138"
+assert s["changes"][1]["from"] == "62" and s["changes"][1]["to"] == "58"
 b, a = d["before"], d["after"]
 assert b["y_mean"] == s["stats"]["y_mean"] and 105 <= a["y_mean"] <= 140 and 0.90 <= a["wb_bias"] <= 1.12, a
 assert set(d["applied"]) == {"expcomp", "warmth"} and int(d["applied"]["expcomp"]) > 128 and int(d["applied"]["warmth"]) < 62
@@ -2253,30 +2251,29 @@ assert d["dry_run"] is True and d["stopped"] == "dry_run" and d["after"] is None
 assert len(d["steps"]) == 1 and [c["name"] for c in d["steps"][0]["changes"]] == ["expcomp", "warmth"]
 PY
     out=$("$BIN" auto --dry-run 2>&1)
-    has "text plan" "$out" "expcomp 128 -> 140" || return 1
-    has "text plan" "$out" "warmth 62 -> 56" || return 1
+    has "text plan" "$out" "expcomp 128 -> 138" || return 1
+    has "text plan" "$out" "warmth 62 -> 58" || return 1
     has "text stop" "$out" "stopped: dry_run" || return 1
     "$BIN" auto --dry-run --save > out 2>&1; rc=$?
     expect "--dry-run --save" "$rc" 2
 }
 
-t_auto_max_steps() {
+t_auto_steps_and_options() {
     python3 -I -c pass >/dev/null 2>&1 || { echo "# python3 not available"; return 77; }
-    BRIOCTL_FAKE_TRACE=1 "$BIN" auto --json --max-steps 1 > auto.json 2> trace; rc=$?
-    expect "status" "$rc" 0 || return 1
-    expect "SET_CUR count" "$(setcurs trace)" 2 || return 1
-    python3 -I - auto.json <<'PY' || return 1
-import json, sys
-d = json.load(open(sys.argv[1]))
-assert len(d["steps"]) == 1 and d["stopped"] == "max_steps", d["stopped"]
-assert d["applied"] == {"expcomp": "140", "warmth": "56"}, d["applied"]
-assert d["after"]["y_mean"] > d["before"]["y_mean"] and d["after"]["wb_bias"] < d["before"]["wb_bias"]
-PY
-    for bad in "--max-steps 0" "--max-steps 11" "--max-steps x" "--max-steps" "--target eyes" "--wait -1" "--bogus"; do
+    for bad in "--max-steps 2" "--target frame" "--wait 1" "--no-face" "--bogus"; do
         "$BIN" auto $bad > out 2>&1; rc=$?
         expect "auto $bad status" "$rc" 2 || return 1
     done
-    expect "expcomp" "$("$BIN" get expcomp)" 140
+    expect "expcomp" "$("$BIN" get expcomp)" 128 || return 1  # the bad options wrote nothing
+    # a camera that overshoots: the fourth degree of warmth would move it back to where it was
+    "$BIN" expcomp 145 warmth 52 > /dev/null || return 1
+    BRIOCTL_FAKE_CAPTURE_WARMGAIN=8 autoj || return 1
+    python3 -I - auto.json <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["stopped"] == "oscillating" and len(d["steps"]) == 1, (d["stopped"], len(d["steps"]))
+assert d["applied"] == {"warmth": "48"}, d["applied"]
+PY
 }
 
 t_auto_without_a_face() {
@@ -2289,32 +2286,33 @@ assert "no face" in d["note"] and d["before"]["judged"] == "frame" and "face_fra
 assert d["steps"][0]["stats"]["judged"] == "frame"
 PY
     out=$(BRIOCTL_FAKE_CAPTURE_NOFACE=1 "$BIN" auto --dry-run 2>&1)
-    has "text note" "$out" "no face found" || return 1
-    "$BIN" auto --target frame --dry-run --json > auto.json || return 1
-    python3 -I -c 'import json; d = json.load(open("auto.json")); assert d["target"] == "frame" and d["before"]["judged"] == "frame"'
+    has "text note" "$out" "no face found"
 }
 
+# autoto NAME: where the first step of auto.json moves NAME
+autoto() { python3 -I -c 'import json, sys; print([c["to"] for c in json.load(open("auto.json"))["steps"][0]["changes"] if c["name"] == sys.argv[1]][0])' "$1"; }
+
 t_auto_safety_band() {
-    python3 -I -c pass >/dev/null 2>&1 || { echo "# python3 not available"; return 77; }
+    python3 -I -c 'pass' >/dev/null 2>&1 || { echo "# python3 not available"; return 77; }
     "$BIN" expcomp 200 > /dev/null || return 1  # outside the band, far too bright: auto comes back to the edge
-    autoj --max-steps 1 || return 1
-    expect "bright expcomp" "$("$BIN" get expcomp)" 176 || return 1
+    autoj --dry-run || return 1
+    expect "bright expcomp" "$(autoto expcomp)" 176 || return 1
     "$BIN" expcomp 40 warmth 50 > /dev/null || return 1  # outside the band and too dark: up to the edge, not further
-    autoj --max-steps 1 || return 1
-    expect "dark expcomp" "$("$BIN" get expcomp)" 96 || return 1
+    autoj --dry-run || return 1
+    expect "dark expcomp" "$(autoto expcomp)" 96 || return 1
     "$BIN" expcomp 140 warmth 20 > /dev/null || return 1  # warmth below the band and too cool: up to the edge
-    autoj --max-steps 1 || return 1
-    expect "cool warmth" "$("$BIN" get warmth)" 30 || return 1
+    autoj --dry-run || return 1
+    expect "cool warmth" "$(autoto warmth)" 30 || return 1
     # at the limit and still wrong: no write, a note instead
     "$BIN" expcomp 176 > /dev/null || return 1
-    BRIOCTL_FAKE_CAPTURE_BRIGHT=1 autoj --dry-run --max-steps 1 || return 1
+    BRIOCTL_FAKE_CAPTURE_BRIGHT=1 autoj --dry-run || return 1
     expect "no write" "$("$BIN" get expcomp)" 176
 }
 
 t_auto_hdr_and_framing() {
     python3 -I -c pass >/dev/null 2>&1 || { echo "# python3 not available"; return 77; }
     "$BIN" hdr off expcomp 144 warmth 47 > /dev/null || return 1
-    BRIOCTL_FAKE_CAPTURE_BRIGHT=1 autoj --max-steps 1 || return 1
+    BRIOCTL_FAKE_CAPTURE_BRIGHT=1 autoj || return 1
     python3 -I - auto.json <<'PY' || return 1
 import json, sys
 d = json.load(open(sys.argv[1]))
@@ -2332,24 +2330,24 @@ d = json.load(open(sys.argv[1]))
 assert any("fov -" in r and "--framing" in r for r in d["recommendations"]), d["recommendations"]
 assert all(c["name"] not in ("fov", "zoom") for s in d["steps"] for c in s["changes"])
 PY
-    BRIOCTL_FAKE_CAPTURE_SMALLFACE=1 autoj --max-steps 2 || return 1
+    BRIOCTL_FAKE_CAPTURE_SMALLFACE=1 autoj || return 1
     expect "fov untouched" "$("$BIN" get fov)" 78 || return 1
     expect "zoom untouched" "$("$BIN" get zoom)" 115 || return 1
-    BRIOCTL_FAKE_CAPTURE_SMALLFACE=1 autoj --framing --max-steps 2 || return 1
+    BRIOCTL_FAKE_CAPTURE_SMALLFACE=1 autoj --framing || return 1
     python3 -I - auto.json <<'PY' || return 1
 import json, sys
 d = json.load(open(sys.argv[1]))
 fr = [(c["name"], c["from"], c["to"]) for s in d["steps"] for c in s["changes"] if c["name"] in ("fov", "zoom")]
-assert fr == [("fov", "78", "65"), ("zoom", "115", "140")], fr
+assert fr[:2] == [("fov", "78", "65"), ("zoom", "115", "140")], fr
 PY
 }
 
 t_auto_save_and_options() {
     python3 -I -c pass >/dev/null 2>&1 || { echo "# python3 not available"; return 77; }
     [ ! -e home/.config/brioctl/settings ] || return 1
-    autoj --save --max-steps 1 || return 1
+    autoj --save || return 1
     [ -s home/.config/brioctl/settings ] || { echo "# --save wrote no settings file"; return 1; }
-    has "saved expcomp" "$(cat home/.config/brioctl/settings)" "expcomp 140" || return 1
+    has "saved expcomp" "$(cat home/.config/brioctl/settings)" "expcomp $("$BIN" get expcomp)" || return 1
     python3 -I -c 'import json; d = json.load(open("auto.json")); assert d["saved"] is True' || return 1
     out=$("$BIN" help 2>&1)
     has "help" "$out" "brioctl auto" || return 1
@@ -2546,53 +2544,49 @@ t_save_flag() {
 t_install_skill() {
     mkdir -p "$HOME/.claude" bin
     cp "$BIN" bin/brioctl
-    # nothing next to the binary: the copy built in
+    # nothing next to the binary: the copy built in; only ~/.claude exists, ~/.codex is not created
     out=$(bin/brioctl install-skill) || return 1
     has "claude" "$out" "claude: installed $HOME/.claude/skills/brioctl/SKILL.md (from the copy built into brioctl)" || return 1
-    has "codex skipped" "$out" "codex: skipped" || return 1
+    hasnt "codex" "$out" "codex" || return 1
     [ ! -e "$HOME/.codex" ] || { echo "# ~/.codex was created"; return 1; }
     cmp -s "$HERE/../skills/brioctl/SKILL.md" "$HOME/.claude/skills/brioctl/SKILL.md" || { echo "# built-in copy differs from the source"; return 1; }
     [ ! -L "$HOME/.claude/skills/brioctl/SKILL.md" ] || return 1
     # the Homebrew layout wins over the built-in copy
     mkdir -p share/brioctl/skills/brioctl
     echo "from share" > share/brioctl/skills/brioctl/SKILL.md
-    out=$(bin/brioctl install-skill --claude) || return 1
+    out=$(bin/brioctl install-skill) || return 1
     has "share" "$out" "(from " || return 1
     expect "share copy" "$(cat "$HOME/.claude/skills/brioctl/SKILL.md")" "from share" || return 1
-    # a source tree: skills/brioctl/SKILL.md next to the binary
-    mkdir -p bin/skills/brioctl
+    # a source tree: skills/brioctl/SKILL.md next to the binary; both agents once both directories exist
+    mkdir -p bin/skills/brioctl "$HOME/.codex"
     echo "from tree" > bin/skills/brioctl/SKILL.md
-    bin/brioctl install-skill --claude > /dev/null || return 1
-    expect "tree copy" "$(cat "$HOME/.claude/skills/brioctl/SKILL.md")" "from tree" || return 1
-    # --codex creates the directory; --all and no flag do both once both exist
-    out=$(bin/brioctl install-skill --codex) || return 1
-    has "codex" "$out" "codex: installed $HOME/.codex/skills/brioctl/SKILL.md" || return 1
     echo old > "$HOME/.claude/skills/brioctl/SKILL.md"
-    out=$(bin/brioctl install-skill --all) || return 1
-    has "all claude" "$out" "claude: installed" || return 1
-    has "all codex" "$out" "codex: installed" || return 1
-    expect "claude refreshed" "$(cat "$HOME/.claude/skills/brioctl/SKILL.md")" "from tree" || return 1
+    out=$(bin/brioctl install-skill) || return 1
+    has "claude" "$out" "claude: installed" || return 1
+    has "codex" "$out" "codex: installed $HOME/.codex/skills/brioctl/SKILL.md" || return 1
+    expect "tree copy" "$(cat "$HOME/.claude/skills/brioctl/SKILL.md")" "from tree" || return 1
     # a link is replaced by a copy, the target is not written through
     echo keep > target
     rm "$HOME/.codex/skills/brioctl/SKILL.md"; ln -s "$PWD/target" "$HOME/.codex/skills/brioctl/SKILL.md"
-    bin/brioctl install-skill --codex > /dev/null || return 1
+    bin/brioctl install-skill > /dev/null || return 1
     [ ! -L "$HOME/.codex/skills/brioctl/SKILL.md" ] || { echo "# still a link"; return 1; }
     expect "link target untouched" "$(cat target)" keep || return 1
     # uninstall
     out=$(bin/brioctl install-skill --uninstall) || return 1
     has "removed" "$out" "claude: removed" || return 1
     [ ! -e "$HOME/.claude/skills/brioctl" ] && [ ! -e "$HOME/.codex/skills/brioctl" ] || { echo "# not removed"; return 1; }
-    out=$(bin/brioctl install-skill --uninstall --claude) || return 1
+    out=$(bin/brioctl install-skill --uninstall) || return 1
     has "not installed" "$out" "claude: not installed" || return 1
-    bin/brioctl install-skill --bogus > /dev/null 2>&1; expect "bad flag" "$?" 2 || return 1
+    for bad in --bogus --claude --codex --all; do
+        bin/brioctl install-skill $bad > /dev/null 2>&1; expect "$bad" "$?" 2 || return 1
+    done
     # no camera is needed
-    env -u BRIOCTL_FAKE bin/brioctl install-skill --claude > /dev/null || return 1
+    env -u BRIOCTL_FAKE bin/brioctl install-skill > /dev/null || return 1
 }
 
 t_install_skill_without_agents() {
     out=$("$BIN" install-skill) || return 1
-    has "claude" "$out" "claude: skipped" || return 1
-    has "codex" "$out" "codex: skipped" || return 1
+    has "nothing to do" "$out" "nothing to do" || return 1
     [ ! -e "$HOME/.claude" ] && [ ! -e "$HOME/.codex" ] || { echo "# directories were created"; return 1; }
 }
 
@@ -2724,7 +2718,7 @@ run "capture writes no camera register" t_capture_touches_no_register
 run "capture: face region stats, --no-face" t_capture_face
 run "auto: converges, one undo for the whole run" t_auto_converges_and_undoes
 run "auto --dry-run plans one step and writes nothing" t_auto_dry_run
-run "auto --max-steps, bad options" t_auto_max_steps
+run "auto: removed options are refused; an overshooting camera stops as oscillating" t_auto_steps_and_options
 run "auto without a face judges the frame" t_auto_without_a_face
 run "auto keeps expcomp 96-176 and warmth 30-70" t_auto_safety_band
 run "auto: hdr for blown highlights, framing only with --framing" t_auto_hdr_and_framing

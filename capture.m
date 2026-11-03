@@ -204,13 +204,12 @@ static int findFace(const uint8_t *bgra, int w, int h, size_t stride, double *bx
 
 // --- the frames -----------------------------------------------------------------------------------------------------
 
-static int saveFrame(const uint8_t *bgra, int w, int h, size_t stride, struct capture_result *r, const char *path,
-                     const struct capture_opts *o) {
+static int saveFrame(const uint8_t *bgra, int w, int h, size_t stride, struct capture_result *r, const char *path) {
     snprintf(r->path[r->n], CAPTURE_PATH_MAX, "%s", path);
     if (writeJPEG(bgra, w, h, stride, path, r->error, sizeof r->error)) return -1;
     brioctl_picture_stats(bgra, w, h, stride, &r->stats[r->n]);
     double bx = 0, by = 0, bw = 0, bh = 0;
-    int faces = o->no_face ? 0 : findFace(bgra, w, h, stride, &bx, &by, &bw, &bh);
+    int faces = findFace(bgra, w, h, stride, &bx, &by, &bw, &bh);
     faceRegion(bgra, w, h, stride, bx, by, bw, bh, faces, &r->face[r->n]);
     r->n++;
     return 0;
@@ -221,6 +220,7 @@ static int saveFrame(const uint8_t *bgra, int w, int h, size_t stride, struct ca
 // A gradient with a bright square and a face (a flat block), the same every time: red grows to the right, green
 // downwards, blue is 64. With o->have_state the picture follows the camera: the face gets brighter by 2% per step of
 // expcomp above 128 (the rest by 0.5%) and redder by 1% per step of warmth above 50 (the rest by 0.3%).
+// BRIOCTL_FAKE_CAPTURE_WARMGAIN=N multiplies the warmth effect (a camera that overshoots).
 // BRIOCTL_FAKE_CAPTURE_BRIGHT=1 adds a blown-out window on the right (200 instead of 255 when hdr is on).
 int brioctl_capture(const struct capture_opts *o, struct capture_result *r) {
     memset(r, 0, sizeof *r);
@@ -234,7 +234,7 @@ int brioctl_capture(const struct capture_opts *o, struct capture_result *r) {
     if (!px) { snprintf(r->error, sizeof r->error, "out of memory"); return 1; }
     double ef = 1, bf = 1, wd = 0;
     if (o->have_state) {
-        ef = 1 + (o->expcomp - 128) * 0.02, bf = 1 + (o->expcomp - 128) * 0.005, wd = (o->warmth - 50) * 0.01;
+        ef = 1 + (o->expcomp - 128) * 0.02, bf = 1 + (o->expcomp - 128) * 0.005, wd = (o->warmth - 50) * 0.01 * (getenv("BRIOCTL_FAKE_CAPTURE_WARMGAIN") ? atof(getenv("BRIOCTL_FAKE_CAPTURE_WARMGAIN")) : 1);
         if (ef < 0.1) ef = 0.1;
         if (bf < 0.1) bf = 0.1;
     }
@@ -265,7 +265,7 @@ int brioctl_capture(const struct capture_opts *o, struct capture_result *r) {
     for (int i = 0; i < o->count && !rc; i++) {  // no waiting: the tests must not sleep
         char name[CAPTURE_PATH_MAX];
         frameName(o->path, i, o->count, name, sizeof name);
-        rc = saveFrame(px, w, h, stride, r, name, o) ? 1 : 0;
+        rc = saveFrame(px, w, h, stride, r, name) ? 1 : 0;
     }
     free(px);
     return rc;
@@ -428,7 +428,7 @@ int brioctl_capture(const struct capture_opts *o, struct capture_result *r) {
             char name[CAPTURE_PATH_MAX];
             frameName(o->path, i, o->count, name, sizeof name);
             rc = saveFrame(CVPixelBufferGetBaseAddress(pb), (int)CVPixelBufferGetWidth(pb),
-                           (int)CVPixelBufferGetHeight(pb), CVPixelBufferGetBytesPerRow(pb), r, name, o) ? 1 : 0;
+                           (int)CVPixelBufferGetHeight(pb), CVPixelBufferGetBytesPerRow(pb), r, name) ? 1 : 0;
             CVPixelBufferUnlockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
             CVPixelBufferRelease(pb);
         }
