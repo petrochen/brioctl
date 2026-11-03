@@ -12,6 +12,7 @@ class Brioctl < Formula
   def install
     system "make", "VERSION=#{version}"
     bin.install "brioctl"
+    (share/"brioctl/skills/brioctl").install "skills/brioctl/SKILL.md"
   end
 
   # brew services start brioctl
@@ -30,6 +31,8 @@ class Brioctl < Formula
         1. Set the camera the way you want it:   brioctl fov 78 warmth 60 ...
         2. Save the settings:                    brioctl save
         3. Start the agent:                      brew services start brioctl
+
+      For Claude Code or Codex: brioctl install-skill
 
       The settings file is ~/.config/brioctl/settings and the log is #{var}/log/brioctl.log.
       If you installed the agent with "make agent" before, remove it first: make unagent
