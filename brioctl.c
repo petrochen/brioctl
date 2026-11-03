@@ -1740,12 +1740,12 @@ static int undoCmd(Cam *c) {
 
 static int byName(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
 
-// The files in the settings directory (not the dot files), sorted. Returns the count; free each name.
+// The files in the settings directory (not the dot files, not the undo record), sorted. Returns the count; free each name.
 static int savedFiles(const char *dir, char **names, int max) {
     int n = 0;
     DIR *d = opendir(dir);
     for (struct dirent *e; d && n < max && (e = readdir(d));)
-        if (e->d_name[0] != '.' && (names[n] = strdup(e->d_name))) n++;
+        if (e->d_name[0] != '.' && strcmp(e->d_name, "undo") && (names[n] = strdup(e->d_name))) n++;
     if (d) closedir(d);
     qsort(names, n, sizeof *names, byName);
     return n;
