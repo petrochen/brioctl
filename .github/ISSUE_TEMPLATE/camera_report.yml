@@ -1,0 +1,51 @@
+name: Camera report
+description: Tell us how brioctl works with a camera other than the MX Brio
+labels: [camera-report]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for testing. brioctl is tested on hardware only with the MX Brio. See
+        [COMPATIBILITY.md](https://github.com/petrochen/brioctl/blob/main/COMPATIBILITY.md) for the cameras it knows.
+  - type: input
+    id: model
+    attributes:
+      label: Camera model
+      placeholder: Logitech Brio 500
+    validations:
+      required: true
+  - type: input
+    id: usbid
+    attributes:
+      label: USB id
+      description: The vendor and product id shown by `brioctl list`.
+      placeholder: "046d:0943"
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: brioctl version and macOS version
+      description: Output of `brioctl --version`, and your macOS version.
+    validations:
+      required: true
+  - type: textarea
+    id: worked
+    attributes:
+      label: What worked
+      description: Settings you changed and saw take effect (for example zoom, fov, showmode, hdr), and whether `watch` re-applied them.
+    validations:
+      required: true
+  - type: textarea
+    id: failed
+    attributes:
+      label: What did not work
+      description: Commands that failed, were refused, or had no visible effect, with the message printed.
+  - type: textarea
+    id: dump
+    attributes:
+      label: Output of `brioctl dump`
+      description: Add `--camera ID` if more than one camera is connected. `dump` only reads the camera.
+      render: text
+    validations:
+      required: true

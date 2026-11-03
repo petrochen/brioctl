@@ -1,0 +1,40 @@
+name: Bug report
+description: brioctl or the menu bar app does something wrong
+labels: [bug]
+body:
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      placeholder: "14.6, Apple silicon"
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: brioctl version
+      description: Output of `brioctl --version`. Say if you use the menu bar app, and which version.
+    validations:
+      required: true
+  - type: input
+    id: camera
+    attributes:
+      label: Camera model
+      description: For example MX Brio. `brioctl list` shows what brioctl sees.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The commands you ran, what you expected and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: snapshot
+    attributes:
+      label: Output of `brioctl snapshot`
+      description: Add `--camera ID` if more than one camera is connected. The snapshot holds settings and the serial number.
+      render: text
+    validations:
+      required: true

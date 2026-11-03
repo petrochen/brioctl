@@ -1,38 +1,59 @@
 # brioctl
 
-brioctl reads and changes the settings of UVC webcams on macOS without the manufacturer's software. It works with any
-UVC camera: it offers the standard controls the camera declares (exposure, white balance, focus, zoom, brightness and
-so on) with the ranges the camera reports. For the Logitech MX Brio (USB `046d:0944`) it adds what Logitech's apps
-control through the camera: the field of view, Show Mode, HDR, white balance warmth, tint, vibrance, exposure
-compensation and the camera microphone. A few other Logitech Brio models have experimental support for the field of
-view. `brioctl watch` puts your settings back every time the camera is connected or video starts, and a
-[menu bar app](#menu-bar-app) gives the same controls in a window.
+Logitech's apps for the MX Brio are heavy, want an account, and cannot be scripted. If all you need is to set the field
+of view, turn HDR off or keep your settings after a reconnect, that is a lot to run.
+
+**brioctl** reads and changes the settings of UVC webcams on macOS without the manufacturer's software: a command-line
+tool and a menu bar app for the Logitech MX Brio and any other UVC camera.
+
+```sh
+brew install petrochen/tap/brioctl            # CLI
+brew install --cask petrochen/tap/brioctl-app # menu bar app
+```
+
+![brioctl in the terminal: show the settings, change the field of view, zoom and HDR, show them again](docs/media/cli.gif)
+
+<img src="docs/media/app.png" alt="The brioctl menu bar window with the Logitech settings of an MX Brio" width="420">
 
 The command-line tool is one C file that talks to the camera through IOKit. It needs no driver, no root and no
-third-party library.
+third-party library. The [menu bar app](#menu-bar-app) gives the same controls in a window.
 
 Not affiliated with or endorsed by Logitech. See [Disclaimer](#disclaimer).
 
 ## Features
 
-- Any UVC camera: `brioctl list` shows them, `--camera` picks one, and `brioctl` lists the standard controls the camera
-  declares (exposure, gain, white balance, focus, brightness, contrast, hue, gamma, sharpness, zoom, pan, tilt, roll,
-  iris, privacy shutter and more) with the camera's own ranges. See [Supported cameras](#supported-cameras).
-- For the MX Brio, the settings that Logitech's apps control through the camera: field of view (90, 78 or 65 degrees),
-  Show Mode, HDR, white balance warmth, tint, vibrance, exposure compensation, camera microphone on and off. The field
-  of view is also available, as an experimental feature, on the other Brio models.
+- Any UVC camera: it offers the standard controls the camera declares (exposure, white balance, focus, zoom, brightness
+  and so on) with the ranges the camera reports. `brioctl list` shows the cameras, `--camera` picks one, and `brioctl`
+  lists the controls: exposure, gain, white balance, focus, brightness, contrast, hue, gamma, sharpness, zoom, pan,
+  tilt, roll, iris, privacy shutter and more. See [Supported cameras](#supported-cameras).
+- For the Logitech MX Brio (USB `046d:0944`), the settings that Logitech's apps control through the camera: field of
+  view (90, 78 or 65 degrees), Show Mode, HDR, white balance warmth, tint, vibrance, exposure compensation, camera
+  microphone on and off. The field of view is also available, as an experimental feature, on a few other Brio models.
 - Zoom, pan and tilt (digital on the Logitech cameras), and on the MX Brio smooth zoom: zoom and pan glide to the new
   value in about 3 seconds.
 - The macOS input volume of the camera microphone (`micgain`, MX Brio).
-- Presets, including `colorboost`, and named settings files: `save` and `apply`.
-- `import optionsplus` turns the settings Logi Options+ saved for the camera into a settings file, without a camera.
 - `watch`, a LaunchAgent that re-applies your settings when the camera is connected and when video starts, for any
   camera.
+- Presets, including `colorboost`, and named settings files: `save` and `apply`.
+- `import optionsplus` turns the settings Logi Options+ saved for the camera into a settings file, without a camera.
 - A [menu bar app](#menu-bar-app) with the same controls, global hotkeys and a `brioctl://` URL scheme for Shortcuts.
 - `--json` output and `get NAME` for scripts.
 - `snapshot` for bug reports, `defaults` to go back to the camera's default values, and `factory-reset` to restart the
   MX Brio with factory settings and then restore yours.
 - A read-only `dump` of every unit and extension control the camera has.
+
+### Compared with
+
+|                                        | brioctl       | Logi Tune        | Logi Options+    | Generic "Webcam Settings" app |
+| -------------------------------------- | ------------- | ---------------- | ---------------- | ----------------------------- |
+| No background agents, no sign-in       | yes           | background agent | background agent | —                             |
+| Scriptable (CLI, `--json`, URL scheme) | yes           | no               | no               | —                             |
+| MX Brio field of view, Show Mode, HDR  | yes           | yes              | yes              | —                             |
+| Re-applies settings on connect         | yes (`watch`) | —                | —                | —                             |
+| Open source                            | yes (MIT)     | no               | no               | —                             |
+| Price                                  | free          | free             | free             | —                             |
+
+A dash means that it depends on the app or that it was not checked.
 
 ## Menu bar app
 
