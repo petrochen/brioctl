@@ -7,3 +7,5 @@
 /tests/brioctl-fake.dSYM
 /brioctl-info.generated.plist*
 /skill-embedded.h*
+capture.jpg
+.DS_Store
