@@ -1,0 +1,13 @@
+{
+  "name": "brioctl",
+  "version": "1.2.0",
+  "description": "Lets an agent read a macOS webcam frame, measure it and adjust exposure, white balance, zoom and field of view with dry-run and undo.",
+  "author": {
+    "name": "Alex Petrochenko",
+    "url": "https://github.com/petrochen"
+  },
+  "homepage": "https://github.com/petrochen/brioctl",
+  "repository": "https://github.com/petrochen/brioctl",
+  "license": "MIT",
+  "keywords": ["webcam", "camera", "macos", "uvc", "mx-brio", "exposure", "white-balance"]
+}

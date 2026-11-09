@@ -10,6 +10,7 @@ forgets some when it loses power or when a call starts the video.
 brew install petrochen/tap/brioctl            # the CLI
 brew install --cask petrochen/tap/brioctl-app # the menu bar app
 brioctl install-skill                         # teach Claude Code and Codex to use it
+npx skills add petrochen/brioctl              # or: any agent via skills.sh
 ```
 
 ![An agent loop in the terminal: read the picture, brioctl auto, measure again, undo](docs/media/agent-demo.gif)

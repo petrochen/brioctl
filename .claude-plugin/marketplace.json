@@ -1,0 +1,15 @@
+{
+  "name": "petrochen",
+  "description": "Claude Code plugins by Alex Petrochenko",
+  "owner": {
+    "name": "Alex Petrochenko",
+    "url": "https://github.com/petrochen"
+  },
+  "plugins": [
+    {
+      "name": "brioctl",
+      "source": "./",
+      "description": "Read and adjust a macOS webcam (Logitech MX Brio and other UVC cameras) from an agent: measure a frame, tune exposure, white balance, zoom and FOV, with dry-run and undo."
+    }
+  ]
+}
