@@ -196,17 +196,17 @@ static const Ctrl MXBRIO[] = {
     {"smooth",     "glide to new zoom and pan in about 3 s",    U_PERIPHERAL, 0x03, 3, ON_OFF, 0, 1},
     {0},
 };
-static const Ctrl BRIO500[] = {K_LOGITECH, K_FOV, K_SHOWMODE, K_HDR, {0}};
-static const Ctrl BRIO[] = {K_LOGITECH, K_FOV, K_HDR, {0}};  // and the Brio 4K Stream Edition
-static const Ctrl BRIO50X[] = {K_LOGITECH, K_FOV, {0}};      // Brio 501 and 505
+static const Ctrl BRIO500[] = {K_LOGITECH, K_FOV, K_SHOWMODE, K_HDR, {0}};  // also 501, 505 and two more MX Brio ids
+static const Ctrl BRIO[] = {K_LOGITECH, K_FOV, K_HDR, {0}};  // also the 4K Stream Edition, 4K Pro Magnetic, Brio 920
+#define K_EIS {"eis", "image stabilisation (crops the picture a little)", U_VIDEOPIPE, 0x07, 1, ON_OFF}
+// byte 1 of the camera's audio block; the other 17 bytes are written back as they were read
+#define K_STEREO {"stereo", "stereo microphone", U_PERIPHERAL, 0x0f, 18, ON_OFF, 1, 1, .nodef = 1}
+static const Ctrl REACH[] = {K_LOGITECH, K_HDR, K_EIS, K_STEREO, {0}};
 // The StreamCam's roll control cannot be written: it says how the camera is turned. Videopipe 17 (auto rotation) is
 // not offered: the camera takes it and the picture on macOS stays the same.
 static const Ctrl STREAMCAM[] = {
-    K_LOGITECH, K_HDR,
-    {"eis",         "image stabilisation (crops the picture a little)", U_VIDEOPIPE,  0x07, 1, ON_OFF},
-    // byte 1 of the camera's audio block; the other 17 bytes are written back as they were read
-    {"stereo",      "stereo microphone",                 U_PERIPHERAL, 0x0f, 18, ON_OFF, 1, 1, .nodef = 1},
-    {"orientation", "how the camera is turned, in degrees (a sensor)",  U_CT,         0x0f, 2, NULL, 0, 0, 0, 1},
+    K_LOGITECH, K_HDR, K_EIS, K_STEREO,
+    {"orientation", "how the camera is turned, in degrees (a sensor)", U_CT, 0x0f, 2, NULL, 0, 0, 0, 1},
     {0},
 };
 
@@ -217,8 +217,9 @@ static const Ctrl STREAMCAM[] = {
 // view, selector 5 of the Videopipe unit (GUID 49e40215-...), 1 byte, 0 = 90, 1 = 78, 2 = 65 degrees, for these PIDs and
 // names and no others. OpenLogi issue 1222 (a Brio 500, firmware 0.21) adds Show Mode, selector 13, 1 byte, 0 or 1, and
 // says the HDR switch of Logi Tune is the backlight compensation control of the processing unit. That control is called
-// hdr, not backlight, on the MX Brio, the Brio 500, the Brio and the Brio 4K Stream Edition. StreamCam: the settings
-// Logi Tune 3.15 offers for it, each checked on a camera (docs/registers.md).
+// hdr, not backlight, there. Logi Tune 3.15 keeps a list of what it offers for each model: it agrees with both sources,
+// gives the Brio 501 and 505 the Show Mode and hdr of the Brio 500, and adds the models below the Brio 4K Stream
+// Edition. StreamCam: what that list says, each setting checked on a camera (docs/registers.md).
 struct Model {
     int vid, pid;
     const char *name;
@@ -230,9 +231,17 @@ static const Model MODELS[] = {
     {VID_LOGITECH, PID_MXBRIO, "MX Brio", MXBRIO, .tested = 1, .mxbrio = 1},
     {VID_LOGITECH, 0x0943, "Brio 500", BRIO500},
     {VID_LOGITECH, 0x085e, "Brio", BRIO},
-    {VID_LOGITECH, 0x0946, "Brio 501", BRIO50X},
-    {VID_LOGITECH, 0x0919, "Brio 505", BRIO50X},
+    {VID_LOGITECH, 0x0946, "Brio 501", BRIO500},
+    {VID_LOGITECH, 0x0919, "Brio 505", BRIO500},
     {VID_LOGITECH, 0x086b, "Brio 4K Stream Edition", BRIO},
+    {VID_LOGITECH, 0x087f, "4K Pro Magnetic", BRIO},
+    {VID_LOGITECH, 0x091d, "MX Brio 705 for Business", BRIO500},
+    {VID_LOGITECH, 0x0947, "MX Brio (046d:0947)", BRIO500},
+    {VID_LOGITECH, 0x0964, "Brio 920", BRIO},
+    {VID_LOGITECH, 0x0998, "Brio 920 for Business", BRIO},
+    {VID_LOGITECH, 0x099a, "Brio 920 Plus", BRIO},
+    {VID_LOGITECH, 0x0999, "Brio 920 Plus for Business", BRIO},
+    {VID_LOGITECH, 0x0948, "Reach", REACH},
     {VID_LOGITECH, 0x0893, "StreamCam", STREAMCAM, .tested = 1},
 };
 #define NMODELS (int)(sizeof MODELS / sizeof *MODELS)

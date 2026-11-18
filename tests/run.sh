@@ -839,24 +839,37 @@ t_two_known_cameras() {
 }
 
 t_logitech_models() {
-    # which models get what: hdr is the name on the 4 models of the table that have it, fov on all of them
-    for row in "0944 hdr" "0943 hdr" "085e hdr" "086b hdr" "0946 backlight" "0919 backlight"; do
-        set -- $row
-        sed "s/^device .*/device 046d $1/" camera.snap > model.snap
+    # which models get what: fov and hdr on every model of the table with the field of view switch
+    for pid in 0944 0943 0946 0919 091d 0947 085e 086b 087f 0964 0998 0999 099a; do
+        sed "s/^device .*/device 046d $pid/" camera.snap > model.snap
         out=$(BRIOCTL_FAKE=$PWD/model.snap "$BIN" 2>&1) || return 1
-        matches "$1 has fov" "$out" "^  fov +" || return 1
-        matches "$1 calls it $2" "$out" "^  $2 +" || return 1
+        matches "$pid has fov" "$out" "^  fov +" || return 1
+        matches "$pid calls it hdr" "$out" "^  hdr +" || return 1
+        noline "$pid has no backlight line" "$out" backlight || return 1
     done
-    for pid in 0943 0944; do
+    for pid in 0943 0944 0946 0919 091d 0947; do
         sed "s/^device .*/device 046d $pid/" camera.snap > model.snap
         matches "$pid has Show Mode" "$(BRIOCTL_FAKE=$PWD/model.snap "$BIN" 2>&1)" "^  showmode +" || return 1
     done
-    for pid in 085e 0946 0919 086b; do
+    for pid in 085e 086b 087f 0964 0998 0999 099a; do
         sed "s/^device .*/device 046d $pid/" camera.snap > model.snap
         noline "$pid has no Show Mode" "$(BRIOCTL_FAKE=$PWD/model.snap "$BIN" 2>&1)" showmode || return 1
     done
+    # only the tested model has the MX Brio's other controls, whatever the name says
+    for pid in 091d 0947; do
+        sed "s/^device .*/device 046d $pid/" camera.snap > model.snap
+        out=$(BRIOCTL_FAKE=$PWD/model.snap "$BIN" 2>&1) || return 1
+        has "$pid is experimental" "$out" "experimental support" || return 1
+        for name in warmth expcomp mic smooth micgain; do noline "$pid has no $name" "$out" "$name" || return 1; done
+    done
+    # the Reach: the StreamCam's hdr, eis and stereo, not its orientation sensor
+    sed "s/^device .*/device 046d 0948/" streamcam.snap > model.snap
+    out=$(BRIOCTL_FAKE=$PWD/model.snap "$BIN" 2>&1) || return 1
+    for name in hdr eis stereo; do matches "Reach has $name" "$out" "^  $name +" || return 1; done
+    noline "Reach has no orientation" "$out" orientation || return 1
+    has "Reach is experimental" "$out" "experimental support" || return 1
     # an unknown Logitech camera, and another vendor's camera that has Logitech's units: standard controls only
-    for dev in "046d 0999" "1234 5678"; do
+    for dev in "046d 0aaa" "1234 5678"; do
         sed "s/^device .*/device $dev/" camera.snap > model.snap
         out=$(BRIOCTL_FAKE=$PWD/model.snap "$BIN" 2>&1) || return 1
         has "$dev is standard" "$out" "standard UVC controls only" || return 1
@@ -1564,14 +1577,14 @@ dev.pop(1)
     out=$("$BIN" import optionsplus first.db 2> /dev/null)
     has "its camera line" "$out" "# camera 046d:091d" || return 1
     has "its fov" "$out" "fov 65" || return 1
-    has "no MX Brio, one camera" "$out" "# Logitech 091d, profile PROFILE_NAME_DEFAULT" || return 1
+    has "no MX Brio, one camera" "$out" "# MX Brio 705 for Business, profile PROFILE_NAME_DEFAULT" || return 1
     mkdb first2.db "$other
 dev.pop(1)
 dev.append(copy.deepcopy(dev[0]))
 dev[1]['slotPrefix'] = 'brio-x'
 " || return 1
     out=$("$BIN" import optionsplus first2.db 2> /dev/null)
-    has "first picked" "$out" "# Logitech 091d (the first of 2 cameras in the settings, no MX Brio), profile PROFILE_NAME_DEFAULT" || return 1
+    has "first picked" "$out" "# MX Brio 705 for Business (the first of 2 cameras in the settings, no MX Brio), profile PROFILE_NAME_DEFAULT" || return 1
     # the file names the model it was made for, so apply warns about another one
     "$BIN" import optionsplus first.db --save other > /dev/null 2>&1 || return 1
     has "apply warns about another model" "$("$BIN" apply other 2>&1)" "warning: these settings were saved from camera 046d:091d, this is 046d:0944"

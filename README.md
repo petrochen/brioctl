@@ -132,10 +132,10 @@ A copy downloaded by a browser needs "Open Anyway" in System Settings, or `xattr
 
 - `full`: the Logitech MX Brio (firmware 1.1.394) and StreamCam, tested on hardware, with their own controls on top of
   the standard ones.
-- `experimental`: five other Brio models, with the field of view, Show Mode and `hdr` that
-  [cameractrls](https://github.com/soyersoyer/cameractrls) and an
-  [OpenLogi issue](https://github.com/AprilNEA/OpenLogi/issues/1222) report. Not tested: send
-  `brioctl snapshot report.snap` if you own one.
+- `experimental`: thirteen more Logitech models (Brio, Brio 500 and 920 families, 4K Pro Magnetic, Reach), with the
+  field of view, Show Mode, `hdr`, `eis` and `stereo` that [cameractrls](https://github.com/soyersoyer/cameractrls),
+  an [OpenLogi issue](https://github.com/AprilNEA/OpenLogi/issues/1222) and Logitech's own app name for them. Not
+  tested: send `brioctl snapshot report.snap` if you own one.
 - `standard`: every other UVC camera, with the standard controls it declares. No extension unit is written.
 
 The table per model is [COMPATIBILITY.md](COMPATIBILITY.md), the registers are in

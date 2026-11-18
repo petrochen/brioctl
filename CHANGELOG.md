@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Eight more Logitech models, experimental (not tested on hardware): 4K Pro Magnetic (`046d:087f`), MX Brio 705 for
+  Business (`091d`), a second MX Brio id (`0947`), Brio 920, 920 for Business, 920 Plus and 920 Plus for Business
+  (`0964`, `0998`, `099a`, `0999`) with the field of view and `hdr`, the first three with Show Mode too; Reach (`0948`)
+  with `hdr`, `eis` and `stereo`. The source is the list Logi Tune keeps of what it offers for each model.
+
+### Changed
+
+- Brio 501 and 505 get Show Mode and `hdr`, as the Brio 500 does: Logi Tune treats the three alike.
+
 ## 1.3.0 — 2026-11-18
 
 ### Added
