@@ -133,6 +133,7 @@ struct Ctrl {
     int scale;                // register value = number * scale; 0 means 1
     int sgn;                  // field is signed
     int after;                // a heading in a model's list: from here on, shown after the standard controls
+    int nodef;                // GET_DEF only repeats the current value: no default to show or to go back to
     const char *group;        // headings: the name of the group in JSON
 };
 
@@ -198,6 +199,16 @@ static const Ctrl MXBRIO[] = {
 static const Ctrl BRIO500[] = {K_LOGITECH, K_FOV, K_SHOWMODE, K_HDR, {0}};
 static const Ctrl BRIO[] = {K_LOGITECH, K_FOV, K_HDR, {0}};  // and the Brio 4K Stream Edition
 static const Ctrl BRIO50X[] = {K_LOGITECH, K_FOV, {0}};      // Brio 501 and 505
+// The StreamCam's roll control cannot be written: it says how the camera is turned. Videopipe 17 (auto rotation) is
+// not offered: the camera takes it and the picture on macOS stays the same.
+static const Ctrl STREAMCAM[] = {
+    K_LOGITECH, K_HDR,
+    {"eis",         "image stabilisation (crops the picture a little)", U_VIDEOPIPE,  0x07, 1, ON_OFF},
+    // byte 1 of the camera's audio block; the other 17 bytes are written back as they were read
+    {"stereo",      "stereo microphone",                 U_PERIPHERAL, 0x0f, 18, ON_OFF, 1, 1, .nodef = 1},
+    {"orientation", "how the camera is turned, in degrees (a sensor)",  U_CT,         0x0f, 2, NULL, 0, 0, 0, 1},
+    {0},
+};
 
 // The models brioctl knows, one row each. A tested model was checked on hardware with brioctl (support "full"); the
 // others get only what other projects report (support "experimental"). Any other camera gets the standard UVC controls
@@ -206,7 +217,8 @@ static const Ctrl BRIO50X[] = {K_LOGITECH, K_FOV, {0}};      // Brio 501 and 505
 // view, selector 5 of the Videopipe unit (GUID 49e40215-...), 1 byte, 0 = 90, 1 = 78, 2 = 65 degrees, for these PIDs and
 // names and no others. OpenLogi issue 1222 (a Brio 500, firmware 0.21) adds Show Mode, selector 13, 1 byte, 0 or 1, and
 // says the HDR switch of Logi Tune is the backlight compensation control of the processing unit. That control is called
-// hdr, not backlight, on the MX Brio, the Brio 500, the Brio and the Brio 4K Stream Edition.
+// hdr, not backlight, on the MX Brio, the Brio 500, the Brio and the Brio 4K Stream Edition. StreamCam: the settings
+// Logi Tune 3.15 offers for it, each checked on a camera (docs/registers.md).
 struct Model {
     int vid, pid;
     const char *name;
@@ -221,6 +233,7 @@ static const Model MODELS[] = {
     {VID_LOGITECH, 0x0946, "Brio 501", BRIO50X},
     {VID_LOGITECH, 0x0919, "Brio 505", BRIO50X},
     {VID_LOGITECH, 0x086b, "Brio 4K Stream Edition", BRIO},
+    {VID_LOGITECH, 0x0893, "StreamCam", STREAMCAM, .tested = 1},
 };
 #define NMODELS (int)(sizeof MODELS / sizeof *MODELS)
 
@@ -411,7 +424,7 @@ static void usbString(io_service_t s, CFStringRef key, char *out, size_t n) {
 // and closeCam writes the file back, so separate brioctl processes see each other's writes. BRIOCTL_FAKE may name
 // several snapshots separated by ':': several cameras, at USB locations 0x100000, 0x200000, ... in the order given, or
 // where a snapshot's own "location 0x..." line puts them.
-#define FAKE_REGS 128
+#define FAKE_REGS 256
 
 static struct {
     Reg reg[FAKE_REGS];
@@ -856,9 +869,43 @@ static int matchId(const CamInfo *l, int n, const char *id, int *pick) {
     return found;
 }
 
+static void configPath(const char *name, char *out, size_t n) {
+    const char *home = getenv("HOME");
+    if (strchr(name, '/')) snprintf(out, n, "%s", name);
+    else snprintf(out, n, "%s/.config/brioctl/%s", home ? home : ".", name);
+}
+
+// The "# camera VID:PID SERIAL" line of a settings file: 1 and the ids if there is one; serial is "" if it has none.
+static int fileCamera(const char *path, unsigned *vid, unsigned *pid, char serial[48]) {
+    FILE *f = fopen(path, "r");
+    char line[256];
+    int found = 0;
+    serial[0] = 0;
+    while (f && !found && fgets(line, sizeof line, f))
+        found = !strncmp(line, "# camera ", 9) && sscanf(line, "# camera %x:%x %47s", vid, pid, serial) >= 2;
+    if (f) fclose(f);
+    return found;
+}
+
+// The camera a settings file was saved from, where it is clear which of l that is: the only one of that model, or
+// among several the one with the file's serial number. -1 if the file names no camera, -2 if no camera of that model
+// is here, -3 if several are and the serial number does not tell.
+static int fileTarget(const char *path, const CamInfo *l, int n) {
+    unsigned vid, pid;
+    char serial[48];
+    int same = 0, exact = 0, pick = -1, pickExact = -1;
+    if (!fileCamera(path, &vid, &pid, serial)) return -1;
+    for (int i = 0; i < n; i++) {
+        if (l[i].vid != (int)vid || l[i].pid != (int)pid) continue;
+        same++, pick = i;
+        if (serial[0] && !strcmp(l[i].serial, serial)) exact++, pickExact = i;
+    }
+    return exact == 1 ? pickExact : same == 1 ? pick : same ? -3 : -2;
+}
+
 // Which camera does the user mean? ID is an index, a location (0x...) or a serial number; without ID: the only camera,
-// or the only one brioctl knows (full or experimental support). Returns 0 and the position in *pick, or the exit code
-// after saying why not.
+// or the only one brioctl knows (full or experimental support), or the one the saved settings are from. Returns 0 and
+// the position in *pick, or the exit code after saying why not.
 static int chooseCamera(const CamInfo *l, int n, const char *id, int *pick) {
     *pick = -1;
     if (!n) {
@@ -878,7 +925,11 @@ static int chooseCamera(const CamInfo *l, int n, const char *id, int *pick) {
         if (l[i].support != S_STANDARD) known++, *pick = i;
     if (n == 1) *pick = 0;
     else if (known != 1) {
-        fprintf(stderr, "several cameras: choose one with --camera\n");
+        char path[PATH_MAX];
+        configPath("settings", path, sizeof path);
+        if ((*pick = fileTarget(path, l, n)) >= 0) return 0;
+        fprintf(stderr,
+                "several cameras: choose one with --camera ('brioctl --camera ID save' makes one the default)\n");
         printCameras(stderr, l, n);
         return 2;
     }
@@ -941,7 +992,8 @@ static int avail(const Cam *c, const Ctrl *k) {
 
 // One field of a control, read with GET_CUR, GET_MIN, GET_MAX or GET_DEF.
 static IOReturn getField(Cam *c, const Ctrl *k, int req, long *out) {
-    uint8_t b[8] = {0};
+    uint8_t b[REG_MAX] = {0};
+    if (req == GET_DEF && k->nodef) return kIOReturnUnsupported;
     IOReturn kr = request(c, req, c->unit[k->unit], k->sel, b, k->len, NULL);
     *out = getLE(b + k->off, fieldSize(k), k->sgn);
     return kr;
@@ -1577,7 +1629,7 @@ static int set(Cam *c, const char *name, const char *arg) {
         }
     }
     // A field shares the control with others: keep their current values.
-    uint8_t b[8] = {0};
+    uint8_t b[REG_MAX] = {0};
     int haveCur = !request(c, GET_CUR, unit, k->sel, b, k->len, NULL);
     if (!haveCur && fieldSize(k) < k->len) {
         fprintf(stderr, "%s: cannot read the current value\n", name);
@@ -1615,12 +1667,6 @@ static int set(Cam *c, const char *name, const char *arg) {
 }
 
 // Settings files: "name value" per line, # starts a comment. A name without a slash is a file in ~/.config/brioctl.
-static void configPath(const char *name, char *out, size_t n) {
-    const char *home = getenv("HOME");
-    if (strchr(name, '/')) snprintf(out, n, "%s", name);
-    else snprintf(out, n, "%s/.config/brioctl/%s", home ? home : ".", name);
-}
-
 static void makeConfigDir(void) {
     char p[PATH_MAX];
     configPath("", p, sizeof p);
@@ -1680,10 +1726,16 @@ static int save(Cam *c, const char *name) {
     char path[PATH_MAX];
     if (presetSettings(name)) { fprintf(stderr, "%s is a built-in preset, choose another name\n", name); return 1; }
     configPath(name, path, sizeof path);
+    unsigned vid, pid;
+    char serial[48], ts[32];
+    if (fileCamera(path, &vid, &pid, serial) && ((int)vid != c->info.vid || (int)pid != c->info.pid)) {
+        fprintf(stderr, "%s holds the settings of another camera (%04x:%04x): save this one under a name, "
+                        "brioctl save NAME\n", path, vid, pid);
+        return 1;
+    }
     makeConfigDir();
     FILE *f = fopen(path, "w");
     if (!f) { perror(path); return 1; }
-    char ts[32];
     time_t t = time(NULL);
     strftime(ts, sizeof ts, "%Y-%m-%d %H:%M", localtime(&t));
     fprintf(f, "# brioctl settings, saved %s\n", ts);
@@ -1886,28 +1938,18 @@ static int defaults(Cam *c) {
 static char watchPath[PATH_MAX];
 static const char *watchCamId;  // watch --camera ID, NULL without
 
-// The "# camera VID:PID" line of a settings file: 1 and the ids if there is one.
-static int fileCamera(const char *path, unsigned *vid, unsigned *pid) {
-    FILE *f = fopen(path, "r");
-    char line[256];
-    int found = 0;
-    while (f && !found && fgets(line, sizeof line, f))
-        found = !strncmp(line, "# camera ", 9) && sscanf(line, "# camera %x:%x", vid, pid) == 2;
-    if (f) fclose(f);
-    return found;
-}
-
 // Apply the watch file quietly and end with one log line. A starting camera may not answer yet: retry.
 // video: video has just started, so mic is left alone. While the camera shows the desk, framing is left alone too.
 // A file saved from another model is not applied at all (apply by hand does that, with a warning): watch would do it
 // at every connect and every video start, to a camera nobody chose it for.
 static void reapply(int attempts, int waitFirst, int video) {
     unsigned vid, pid;
+    char serial[48];
     quiet = 1;
     watching = 1;
     videoOn = video;
     written = 0;
-    if (fileCamera(watchPath, &vid, &pid) && ((int)vid != target.vid || (int)pid != target.pid)) {
+    if (fileCamera(watchPath, &vid, &pid, serial) && ((int)vid != target.vid || (int)pid != target.pid)) {
         if (!video) {  // said once per connect, not at every video start
             stamp();
             printf("settings were saved from %04x:%04x; not applying them to %04x:%04x (save them from this camera)\n",
@@ -2152,9 +2194,10 @@ static void cmioWatch(void) {
     cmioSync();
 }
 
-// Which camera watch follows. Without --camera: the one camera with full support (the MX Brio), else the one with
-// experimental support; never a camera brioctl does not know: a LaunchAgent started with the MX Brio unplugged must
-// not apply its settings to a FaceTime camera. With --camera: that camera. If there is none, or the choice is not
+// Which camera watch follows. With --camera: that camera. Without: the camera its settings file was saved from, and
+// only that one. A file that names no camera: the one camera with full support, else the one with experimental
+// support; never a camera brioctl does not know: a LaunchAgent started with the MX Brio unplugged must not apply its
+// settings to a FaceTime camera. If there is none, or the choice is not
 // clear, watch says why and waits (it never exits: launchd would start it again at once) and looks again when a camera
 // comes or after a few seconds. Returns 1 with the camera in target, 0 if there is none yet, -1 if the cameras cannot
 // be listed.
@@ -2172,7 +2215,12 @@ static int watchTarget(const char *camId) {
             snprintf(why, sizeof why, "serial %s matches several cameras, waiting (use the index or the location)",
                      camId);
         else if (!found) snprintf(why, sizeof why, "camera %s is not connected, waiting for it", camId);
-    } else {
+    } else if ((pick = fileTarget(watchPath, l, n)) < -1) {
+        snprintf(why, sizeof why, pick == -2 ? "the camera of these settings is not connected, waiting for it "
+                                               "(--camera ID watches another)"
+                                             : "several cameras like the one of these settings and none has its serial "
+                                               "number, waiting (choose one with --camera ID)");
+    } else if (pick < 0) {
         for (int i = 0; i < n; i++) {
             if (l[i].support == S_FULL) full++, pickFull = i;
             else if (l[i].support == S_EXPERIMENTAL) experimental++, pickExp = i;
@@ -2417,7 +2465,9 @@ static int dump(Cam *c) {
 }
 
 // A register for a snapshot: how many of cur, min, max, res, def to read; len is used if GET_LEN does not answer.
+// unit is U_* in EXTRA and the camera's unit id in the list snapshot makes.
 typedef struct { int unit, sel, len, fields; } SnapReg;
+#define SNAP_MAX 512
 
 // Registers the code reads besides the controls.
 static const SnapReg EXTRA[] = {
@@ -2435,27 +2485,30 @@ static const SnapReg EXTRA[] = {
 };
 #define NEXTRA (int)(sizeof EXTRA / sizeof *EXTRA)
 
-// Read one register: GET_INFO, GET_LEN (extension units) and the first nf of cur, min, max, res, def. Read-only by
+// Read one register of the unit with that id: GET_INFO, GET_LEN (extension units) and the first nf of cur, min, max,
+// res, def; nf -1: all of them for a short register, cur alone for a block of more than 8 bytes. Read-only by
 // construction: only GET_* requests are sent here. Returns 1 if the camera answered anything.
-static int readReg(Cam *c, Reg *r, int u, int sel, int len, int nf) {
+static int readReg(Cam *c, Reg *r, int unit, int sel, int len, int nf) {
     long xlen;
     uint8_t info = 0;
     int any = 0;
     memset(r, 0, sizeof *r);
-    r->unit = c->unit[u];
+    r->unit = unit;
     r->sel = sel;
     r->info = r->len = -1;
-    if (!r->unit) return 0;
-    // Whatever the table says: GET_CUR on the factory reset or the flash lock must never be sent.
-    if (u == U_INFO && (sel == INFO_FACTORY_RESET || sel == INFO_FLASH_LOCK)) nf = 0;
-    if (!request(c, GET_INFO, r->unit, sel, &info, 1, NULL)) { r->info = info; any = 1; }
-    if (isXUnit(u) && !getValue(c, GET_LEN, r->unit, sel, 2, &xlen) && xlen > 0 && xlen <= REG_MAX) {
+    if (!unit) return 0;
+    // Whatever the list says: GET_CUR on the factory reset or the flash lock must never be sent.
+    if (unit == c->unit[U_INFO] && (sel == INFO_FACTORY_RESET || sel == INFO_FLASH_LOCK)) nf = 0;
+    if (!request(c, GET_INFO, unit, sel, &info, 1, NULL)) { r->info = info; any = 1; }
+    if (unit != c->unit[U_CT] && unit != c->unit[U_PU] && !getValue(c, GET_LEN, unit, sel, 2, &xlen) && xlen > 0) {
         r->len = len = (int)xlen;
         any = 1;
     }
+    if (len <= 0 || len > REG_MAX) nf = 0;  // nothing to say how long it is, or longer than a snapshot keeps
+    if (nf < 0) nf = len <= 8 ? F_COUNT : 1;
     for (int i = 0; i < nf; i++) {
         UInt32 done = 0;
-        if (!request(c, FIELDS[i].req, r->unit, sel, r->f[i].b, len > REG_MAX ? REG_MAX : len, &done) && done) {
+        if (!request(c, FIELDS[i].req, unit, sel, r->f[i].b, len, &done) && done) {
             r->f[i].n = done;
             any = 1;
         }
@@ -2463,8 +2516,10 @@ static int readReg(Cam *c, Reg *r, int u, int sel, int len, int nf) {
     return any;
 }
 
-// Everything brioctl reads from the camera, in the format the offline tests load (see tests/). Strictly read-only.
-// The serial number is replaced by zeros so a snapshot can be shared.
+// The camera as a file: its descriptor, every register brioctl reads and every other register of its extension units
+// that dump reads (a service register: what it is and how long, never its value). It is the format the offline tests
+// load (see tests/), so a snapshot of a camera is all it takes to test brioctl with it. Strictly read-only. The serial
+// number is replaced by zeros so a snapshot can be shared.
 static int snapshot(Cam *c, const char *path) {
     FILE *f = path ? fopen(path, "w") : stdout;
     if (!f) { perror(path); return 1; }
@@ -2485,19 +2540,34 @@ static int snapshot(Cam *c, const char *path) {
     Float32 g;
     if (mxbrio(c) && !micRead(&g)) fprintf(f, "micgain %.4f\n", g);
 
-    SnapReg todo[MAX_CTRLS + NEXTRA];
-    int nt = 0, n = 0;
+    static SnapReg todo[SNAP_MAX];
+    int nt = 0, n = 0, inVC = 0;
     for (int i = 0; i < c->ctrls.n; i++) {  // what brioctl would read from this camera
         const Ctrl *k = c->ctrls.k[i];
-        if (avail(c, k)) todo[nt++] = (SnapReg){k->unit, k->sel, k->len, F_COUNT};
+        if (avail(c, k)) todo[nt++] = (SnapReg){c->unit[k->unit], k->sel, k->len, F_COUNT};
     }
-    for (int i = 0; i < NEXTRA && mxbrio(c); i++) todo[nt++] = EXTRA[i];
+    for (int i = 0; i < NEXTRA && mxbrio(c); i++)
+        todo[nt++] = (SnapReg){c->unit[EXTRA[i].unit], EXTRA[i].sel, EXTRA[i].len, EXTRA[i].fields};
+    const uint8_t *d;
+    for (int i = 0; (d = descAt(c, i)); i += d[0]) {  // then the rest of the extension units, as dump walks them
+        if (d[1] == DESC_INTERFACE && d[0] >= 7) inVC = d[5] == 0x0e && d[6] == 1;
+        int size = 0;
+        const uint8_t *bm = inVC && d[1] == DESC_CS_INTERFACE && d[0] >= 20 && d[2] == VC_EXTENSION_UNIT
+                                ? xuControls(d, &size) : NULL;
+        char g[37] = "";
+        if (bm) guidString(d + 4, g);
+        for (int bit = 0; bm && bit < size * 8 && nt < SNAP_MAX; bit++)
+            if (bm[bit / 8] >> (bit % 8) & 1) todo[nt++] = (SnapReg){d[3], bit + 1, 0, serviceReg(g, bit + 1) ? 0 : -1};
+        for (size_t h = 0; bm && h < sizeof HIDDEN / sizeof *HIDDEN && nt < SNAP_MAX; h++)
+            if (!strcmp(g, HIDDEN[h].guid)) todo[nt++] = (SnapReg){d[3], HIDDEN[h].sel, 0, -1};
+    }
     for (int i = 0; i < nt; i++) {
         int dup = 0;
         for (int j = 0; j < i; j++) dup |= todo[j].unit == todo[i].unit && todo[j].sel == todo[i].sel;  // pan, tilt
         Reg r;
         if (dup || !readReg(c, &r, todo[i].unit, todo[i].sel, todo[i].len, todo[i].fields)) continue;
-        if (todo[i].unit == U_INFO && todo[i].sel == INFO_SERIAL) memset(r.f[F_CUR].b, '0', r.f[F_CUR].n);
+        if (r.unit == c->unit[U_INFO] && r.sel == INFO_SERIAL)
+            for (int j = 0; j < F_COUNT; j++) memset(r.f[j].b, '0', r.f[j].n);
         printReg(f, &r);
         n++;
     }
@@ -2558,6 +2628,11 @@ static const struct {
     {"focus", NULL, "focus; can be written only with af off", NULL, 0, NULL},
     {"privacy", NULL, "privacy shutter", NULL, 0, "may cover the lens, so the picture goes dark"},
     {"smooth", NULL, "zoom and pan glide to a new value in about 3 seconds when on", NULL, 0, NULL},
+    {"eis", NULL, "electronic image stabilisation", "steadies a shaking picture and crops it a little", 0, NULL},
+    {"stereo", NULL, "the camera's microphone: two different channels when on, the same sound in both when off", NULL,
+     0, NULL},
+    {"orientation", "degrees", "how the camera is turned: 0 upright, -90 on its side, 180 upside down; a sensor",
+     NULL, 0, NULL},
 };
 
 static int descIndex(const char *name) {
@@ -2940,7 +3015,12 @@ static long bandStep(long cur, long delta, long lo, long hi) {
 static void ruleExposure(const AutoCtx *x, AutoPlan *p) {
     double lo = x->s.face ? AUTO_Y_FACE_LO : AUTO_Y_FRAME_LO, hi = x->s.face ? AUTO_Y_FACE_HI : AUTO_Y_FRAME_HI;
     double y = x->s.ev.y_mean;
-    if (!x->hasExp || (y >= lo && y <= hi)) return;
+    if (y >= lo && y <= hi) return;
+    if (!x->hasExp) {
+        planRec(p, "%s is %s (y_mean %.0f) and this camera has no expcomp: change the light or set brightness by hand",
+                x->s.face ? "the face" : "the frame", y < lo ? "dark" : "bright", y);
+        return;
+    }
     long delta = y < lo ? AUTO_EXP_STEP : -AUTO_EXP_STEP, to = bandStep(x->exp, delta, AUTO_EXP_MIN, AUTO_EXP_MAX);
     if (to == x->exp) {
         planRec(p, "%s is %s (y_mean %.0f) but expcomp %ld is at the safety limit %d-%d: change the light",
@@ -2980,7 +3060,9 @@ static void ruleShadows(const AutoCtx *x, AutoPlan *p) {
         if (to != x->exp)
             planChange(p, "expcomp", a, f, a, "%.1f%% of the %s is crushed to black (above %.0f%%)",
                        x->s.ev.clip_low_pct, x->s.face ? "face" : "frame", AUTO_CLIP_LOW);
-    }
+    } else if (!x->hasHdr && !x->hasExp)
+        planRec(p, "%.1f%% of the %s is crushed to black and this camera has neither hdr nor expcomp: add light",
+                x->s.ev.clip_low_pct, x->s.face ? "face" : "frame");
 }
 
 static void ruleWhiteBalance(const AutoCtx *x, AutoPlan *p) {
@@ -3004,7 +3086,8 @@ static void ruleWhiteBalance(const AutoCtx *x, AutoPlan *p) {
         snprintf(f, sizeof f, "%ld", x->wb);
         planChange(p, "wb", a, f, a, "%s wb_bias %.2f is %s %.2f (awb is off)", x->s.face ? "face" : "frame", b,
                    warm ? "above" : "below", warm ? AUTO_WB_HI : AUTO_WB_LO);
-    }
+    } else if (!strcmp(x->awb, "on") && x->hasWb)
+        planRec(p, "wb_bias %.2f and this camera has no warmth: after `brioctl awb off` auto moves wb", b);
 }
 
 static void ruleFraming(const AutoCtx *x, AutoPlan *p) {
@@ -3328,7 +3411,7 @@ static void usage(FILE *f) {
                "       brioctl auto [--dry-run] [--save] [--json] [--framing]\n"
                "                                   measure the picture, nudge expcomp/hdr/warmth, measure again (undo undoes it)\n"
                "       brioctl dump                list all UVC units and extension controls (read-only)\n"
-               "       brioctl snapshot [FILE]     write every register brioctl reads, serial masked (read-only)\n"
+               "       brioctl snapshot [FILE]     the camera as a file for a report or a test, serial masked (read-only)\n"
                "       brioctl --version           print the version\n");
     fprintf(f, "\nWhich of these a camera has depends on the camera; 'brioctl' shows them with their ranges.\n");
     const CtrlList *all = allCtrls();
@@ -4062,8 +4145,9 @@ int main(int argc, char **argv) {
     if (!strcmp(cmd, "watch")) return watch(arg ? arg : "settings", camId);
     int rc = 0;
 #ifdef BRIOCTL_FAKE
-    if (!strcmp(cmd, "--test-watch-target")) {  // test hook: which camera would watch follow, or why it waits
+    if (!strcmp(cmd, "--test-watch-target")) {  // test hook: which camera would watch [FILE] follow, or why it waits
         char uid[64];
+        configPath(arg ? arg : "settings", watchPath, sizeof watchPath);
         int found = watchTarget(camId);
         if (found < 0) return 1;
         cmioUid(uid, sizeof uid);

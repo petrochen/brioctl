@@ -351,6 +351,33 @@ final class AutoApplyAgentTests: XCTestCase {
         XCTAssertTrue(chosen.follows(standard))
         XCTAssertFalse(chosen.follows(full))
         XCTAssertTrue(AutoApplyAgent(installed: true, camera: "1").follows(full), "by index")
+        // the settings file names a model: that one and no other, whatever brioctl knows about them
+        let ofFile = AutoApplyAgent(installed: true, camera: nil, fileCamera: "046d:0893")
+        XCTAssertFalse(ofFile.follows(full), "another model that brioctl knows")
+        let streamcam = CameraInfo(index: 4, vid: "046d", pid: "0893", name: nil, model: "StreamCam", support: "full",
+                                   serial: "CCC", location: "0x400000")
+        XCTAssertTrue(ofFile.follows(streamcam))
+        XCTAssertTrue(AutoApplyAgent(installed: true, camera: "AAA", fileCamera: "046d:0893").follows(full),
+                      "--camera decides before the file")
+    }
+
+    func testTheSettingsFileOfAnAgentNamesItsCamera() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("brioctl-settings-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        XCTAssertEqual(LaunchAgentManager.settingsFile(in: ["/x/brioctl", "watch"], directory: dir).lastPathComponent,
+                       "settings")
+        XCTAssertEqual(LaunchAgentManager.settingsFile(in: ["/x/brioctl", "--camera", "2", "watch", "desk"],
+                                                       directory: dir).path, dir.appendingPathComponent("desk").path)
+        XCTAssertEqual(LaunchAgentManager.settingsFile(in: ["/x/brioctl", "watch", "/tmp/a/b"], directory: dir).path,
+                       "/tmp/a/b")
+        let file = dir.appendingPathComponent("settings")
+        XCTAssertNil(LaunchAgentManager.fileCamera(at: file), "no file")
+        try "# brioctl settings, saved 2026-11-18 09:00\n# camera 46D:893 ABC\nzoom 100\n"
+            .write(to: file, atomically: true, encoding: .utf8)
+        XCTAssertEqual(LaunchAgentManager.fileCamera(at: file), "046d:0893")
+        try "zoom 100\n".write(to: file, atomically: true, encoding: .utf8)
+        XCTAssertNil(LaunchAgentManager.fileCamera(at: file), "a file written by hand")
     }
 }
 
