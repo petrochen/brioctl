@@ -38,7 +38,7 @@ skill-embedded.h: skills/brioctl/SKILL.md Makefile
 brioctl: brioctl.c capture.m capture.h skill-embedded.h Makefile brioctl-info.generated.plist
 	$(CC) $(CFLAGS) $(DEFS) -fobjc-arc -o $@ brioctl.c capture.m $(LIBS) $(OBJLIBS) $(INFOPLIST)
 
-# Offline tests: the same source against a camera read from tests/mxbrio-1.1.394.snap
+# Offline tests: the same source against cameras read from tests/*.snap (brioctl snapshot of a real camera)
 tests/brioctl-fake: brioctl.c capture.m capture.h skill-embedded.h Makefile
 	$(CC) $(CFLAGS) $(DEFS) -DBRIOCTL_FAKE -fobjc-arc -o $@ brioctl.c capture.m $(LIBS) $(OBJLIBS)
 

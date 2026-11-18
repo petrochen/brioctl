@@ -794,6 +794,7 @@ t_streamcam() {
     out=$("$BIN" auto --dry-run 2>&1) || return 1
     has "auto, exposure" "$out" "this camera has no expcomp" || return 1
     has "auto, white balance" "$out" "this camera has no warmth" || return 1
+    has "auto does not call that in range" "$out" "stopped: out_of_reach" || return 1
     # service registers are in the snapshot by size only
     matches "a service register" "$(cat streamcam.snap)" "^reg $PERIPHERAL 17 info 03 len 0001\$"
 }

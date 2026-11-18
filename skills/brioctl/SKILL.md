@@ -14,8 +14,8 @@ controls. Use only controls it lists.
 Start with `brioctl auto --json` (`--dry-run` first if unsure): it measures the face (two frames averaged, 2 s after
 each change), changes `expcomp` +-10 / `hdr` / `warmth` +-4 in up to 4 steps (`expcomp` stays 96-176, `warmth` 30-70),
 never `mic`, `privacy`, `fov` or `zoom` (`--framing` allows `fov -` / `zoom +25` for a small face), and returns
-`before`, `after`, `applied`, `recommendations`, `stopped` (`in_range`, `no_improvement`, `oscillating`, `max_steps`,
-`dry_run`). One `brioctl undo` reverts the run; `--save` keeps it. Then verify and fix by hand only what is left:
+`before`, `after`, `applied`, `recommendations`, `stopped` (`in_range`, `out_of_reach`: off but no control or at a
+limit, read `recommendations`; `no_improvement`, `oscillating`, `max_steps`, `dry_run`). One `brioctl undo` reverts the run; `--save` keeps it. Then verify and fix by hand only what is left:
 
 1. Read: `brioctl --json` (settings, `status.video.on`), `brioctl describe --json`, `brioctl capture --json -o f.jpg`.
 2. Act with the smallest change the stats below call for: `brioctl hdr on expcomp 135`.
@@ -53,6 +53,9 @@ allow the terminal in System Settings, Privacy & Security, Camera). Errors are p
 
 A value marked `*` (`"auto": true`) is set by an automatic mode: switch the mode off first, restore `auto` afterwards.
 
+StreamCam: `hdr`, `eis` (stabilisation, crops a little), `stereo` (microphone), `orientation` (read-only); it has no
+`expcomp`, `warmth`, `fov` or `mic`, so use `hdr`, `brightness` or `awb off` with `wb` there.
+
 ## Settle times (`settle_seconds` from `describe` wins)
 
 MX Brio: `zoom`, `pan` 3.5 s; `expcomp`, `hdr`, `warmth`, `tint`, `wb`, `awb`, `ae`, `exposure`, `gain` 1 s (the picture
@@ -78,7 +81,8 @@ keeps adapting for about 2 s); the rest 0.3 s. `mic` restarts the camera about 2
 `brioctl save NAME` / `brioctl apply NAME` store and restore settings (`brioctl profiles --json` lists files and
 presets). A `watch` LaunchAgent puts `~/.config/brioctl/settings` back on connect and video start and undoes unsaved
 changes, so add `--save` to a change the user wants to keep (`brioctl expcomp +10 --save`; ask before overwriting their
-file), or point them to "Remember current settings" in the menu bar app.
+file), or point them to "Remember current settings" in the menu bar app. That file belongs to one camera: `save` refuses
+another model, which needs its own name (`brioctl --camera 2 save NAME`).
 
 ## Do not
 

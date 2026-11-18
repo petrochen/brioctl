@@ -3,7 +3,7 @@
 What the Logitech MX Brio (USB `046d:0944`) exposes over USB and what each control does. This is the reference
 behind `brioctl`. It describes behaviour only: what you can read, what you can write, and what the camera does
 about it. The last sections before "Not known" cover the other cameras: the
-[experimental Logitech models](#experimental-models), the
+[experimental Logitech models](#experimental-models), the [StreamCam](#streamcam), the
 [standard controls](#standard-controls-of-other-cameras) of any UVC camera and
 [how `watch` sees video start](#video-start-through-coremediaio).
 
@@ -368,8 +368,8 @@ write if the size is not what it expects. `dump` asks service registers only for
 
 ## Experimental models
 
-`brioctl` knows six Logitech models by their USB product id (vendor `046d`). The MX Brio is `full`: the register notes
-above are about it. The other five are `experimental`: brioctl writes only the extension controls that other projects
+`brioctl` knows seven Logitech models by their USB product id (vendor `046d`). The MX Brio is `full`: the register
+notes above are about it. So is the [StreamCam](#streamcam). The other five are `experimental`: brioctl writes only the extension controls that other projects
 report for them, and the standard controls the camera declares. Nothing here was tested with brioctl (evidence:
 reported), and nothing in the table is known for these cameras beyond the sources below.
 
@@ -413,6 +413,30 @@ What brioctl does with this:
   only if the camera declares it, and both names work on every camera.
 - **Reports.** `brioctl snapshot report.snap` writes the descriptor and every register brioctl reads, with the serial
   number masked. That is what is needed to confirm or correct a row.
+
+## StreamCam
+
+The Logitech StreamCam (USB `046d:0893`) has the Videopipe, Peripheral, device info, Test Debug and AIT units of the MX
+Brio (the same GUIDs) with other selectors behind them. brioctl offers the settings Logitech's desktop app offers for
+this camera. Each was checked on one camera (measured); unit ids there: Videopipe 10, Peripheral 11, device info 8.
+
+| brioctl       | Register                                | Values      | What it does                                                                                                |
+| ------------- | --------------------------------------- | ----------- | ----------------------------------------------------------------------------------------------------------- |
+| `hdr`         | processing unit, backlight compensation | 0, 1        | lifts the shadows: against a window `y_p5` went from 1 to 16, the black pixels from 8.8% to 4.8%            |
+| `eis`         | Videopipe 7, 1 byte                     | 0, 1        | electronic image stabilisation; the picture is cropped a little while it is on                              |
+| `stereo`      | Peripheral 15, byte 1 of 18             | 0, 1        | off: both microphone channels carry the same samples; on: they differ (correlation 0.81 in one recording)   |
+| `orientation` | camera terminal, roll, read-only        | 0, -90, 180 | how the camera is turned: upright, on its side, upside down. A sensor: the camera does not allow writing it |
+
+- Peripheral 15 is a block of 18 bytes. `GET_MIN`, `GET_MAX` and `GET_DEF` return the current block, so the control has
+  no default. brioctl reads the block, changes byte 1 and writes the block back.
+- Videopipe 5 is not the field of view here: 2 bytes, read-only, and it follows the orientation (0 upright, 1 upside
+  down, 3 on its side). The camera has no field of view switch, no Show Mode and none of warmth, tint, vibrance and
+  exposure compensation, so `auto` can only switch `hdr` and move `wb` (with `awb off`) on it.
+- Videopipe 17 (1 byte, 0 or 1, default 0, found at 1) is the auto rotation switch of Logitech's app. The camera
+  takes both values and the picture macOS gets is the same: upside down stays upside down, and every video format is
+  landscape. brioctl does not offer it.
+- Not known: Videopipe 4, 6, 8 to 16; Peripheral 9 (5 bytes here, 6 on the MX Brio). Device info 1 reads `00 01 d6 00`,
+  which is firmware 0.1.214 if it is laid out as on the MX Brio; that is not confirmed.
 
 ## Standard controls of other cameras
 
