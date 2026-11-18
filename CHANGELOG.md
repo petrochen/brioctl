@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.3.1 — 2026-11-18
 
 ### Added
 
@@ -8,6 +8,9 @@
   Business (`091d`), a second MX Brio id (`0947`), Brio 920, 920 for Business, 920 Plus and 920 Plus for Business
   (`0964`, `0998`, `099a`, `0999`) with the field of view and `hdr`, the first three with Show Mode too; Reach (`0948`)
   with `hdr`, `eis` and `stereo`. The source is the list Logi Tune keeps of what it offers for each model.
+
+- `COMPATIBILITY.md` lists the Logitech cameras for which the standard controls are all there is (C920, C922, C925e
+  and C930 families, C505, C615, C270, C310, Brio 90 to 305).
 
 ### Changed
 

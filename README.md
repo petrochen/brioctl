@@ -132,11 +132,14 @@ A copy downloaded by a browser needs "Open Anyway" in System Settings, or `xattr
 
 - `full`: the Logitech MX Brio (firmware 1.1.394) and StreamCam, tested on hardware, with their own controls on top of
   the standard ones.
-- `experimental`: thirteen more Logitech models (Brio, Brio 500 and 920 families, 4K Pro Magnetic, Reach), with the
-  field of view, Show Mode, `hdr`, `eis` and `stereo` that [cameractrls](https://github.com/soyersoyer/cameractrls),
-  an [OpenLogi issue](https://github.com/AprilNEA/OpenLogi/issues/1222) and Logitech's own app name for them. Not
-  tested: send `brioctl snapshot report.snap` if you own one.
-- `standard`: every other UVC camera, with the standard controls it declares. No extension unit is written.
+- `experimental`: Logitech Brio (4K), Brio 4K Stream Edition, 4K Pro Magnetic, Brio 500, 501 and 505, MX Brio 705 for
+  Business, Brio 920, 920 for Business, 920 Plus and 920 Plus for Business, Reach: with the field of view, Show Mode,
+  `hdr`, `eis` and `stereo` that [cameractrls](https://github.com/soyersoyer/cameractrls), an
+  [OpenLogi issue](https://github.com/AprilNEA/OpenLogi/issues/1222) and Logitech's own app name for them. Not tested:
+  send `brioctl snapshot report.snap` if you own one.
+- `standard`: every other UVC camera, with the standard controls it declares. No extension unit is written. That is
+  all Logitech's own app offers too for the C920, C922, C925e and C930 families, the C505, C615, C270 and C310, and
+  the Brio 90, 95, 100, 101, 105, 300, 301 and 305.
 
 The table per model is [COMPATIBILITY.md](COMPATIBILITY.md), the registers are in
 [docs/registers.md](docs/registers.md). Without `--camera`, brioctl uses the only camera, or the only one it knows, or

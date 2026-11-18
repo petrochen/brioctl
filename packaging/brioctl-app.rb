@@ -4,7 +4,7 @@
 # Written for the current Homebrew DSL (postflight_steps, depends_on macos: :ventura). Homebrew before 7 wants
 # `postflight do system_command "/usr/bin/xattr", args: [...] end` and `depends_on macos: ">= :ventura"` instead.
 cask "brioctl-app" do
-  version "1.3.0"
+  version "1.3.1"
   sha256 "7e5a94e9e6dfd9aabd101258ff387edef5254d98362a459250da2f51f7be196b"
 
   url "https://github.com/petrochen/brioctl/releases/download/v#{version}/brioctl-app-#{version}.zip"
