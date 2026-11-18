@@ -94,20 +94,25 @@ public struct AutoApplyAgent: Equatable {
     public var installed: Bool
     /// The `--camera` the agent was started with; nil = it picks the camera itself.
     public var camera: String?
+    /// The model its settings file was saved from, "vid:pid" as in `brioctl list`; nil = the file names none.
+    public var fileCamera: String?
 
     public static let none = AutoApplyAgent(installed: false, camera: nil)
 
-    public init(installed: Bool, camera: String?) {
+    public init(installed: Bool, camera: String?, fileCamera: String? = nil) {
         self.installed = installed
         self.camera = camera
+        self.fileCamera = fileCamera
     }
 
     /// Does saving the settings of this camera feed the agent? An agent started with `--camera` follows that camera.
-    /// One started without it follows a camera brioctl knows and never a standard one (it waits for the MX Brio
-    /// instead), so saving a standard camera over its file would only break it.
+    /// One started without it follows the camera its settings file was saved from, and `brioctl save` refuses to put
+    /// another model's settings over that file. While the file names no camera the agent follows a camera brioctl
+    /// knows and never a standard one, so saving a standard camera over its file would only break it.
     public func follows(_ camera: CameraInfo?) -> Bool {
         guard installed, let camera else { return false }
         if let id = self.camera { return camera.matches(id: id) }
+        if let fileCamera { return "\(camera.vid):\(camera.pid)".lowercased() == fileCamera }
         return camera.support != "standard"
     }
 }
@@ -119,14 +124,18 @@ public final class LaunchAgentManager {
     public let cliPath: String
     public let appPath: String
     public let logPath: String
+    /// Where the settings files are (~/.config/brioctl); nil = the agent's file is never looked at.
+    public let settingsDirectory: URL?
     private let fm = FileManager.default
 
-    public init(directory: URL, launchctl: LaunchctlRunning, cliPath: String, appPath: String, logPath: String) {
+    public init(directory: URL, launchctl: LaunchctlRunning, cliPath: String, appPath: String, logPath: String,
+                settingsDirectory: URL? = nil) {
         self.directory = directory
         self.launchctl = launchctl
         self.cliPath = cliPath
         self.appPath = appPath
         self.logPath = logPath
+        self.settingsDirectory = settingsDirectory
     }
 
     public func plistURL(_ label: String) -> URL { directory.appendingPathComponent("\(label).plist") }
@@ -200,9 +209,31 @@ public final class LaunchAgentManager {
             let url = plistURL(label)
             guard fm.fileExists(atPath: url.path) else { continue }
             let args = Self.read(url).flatMap { $0["ProgramArguments"] as? [String] } ?? []
-            return AutoApplyAgent(installed: true, camera: Self.cameraArgument(in: args))
+            let file = settingsDirectory.map { Self.settingsFile(in: args, directory: $0) }
+            return AutoApplyAgent(installed: true, camera: Self.cameraArgument(in: args),
+                                  fileCamera: file.flatMap(Self.fileCamera(at:)))
         }
         return .none
+    }
+
+    /// The settings file of an agent: the argument after `watch` (a name in the settings directory, or a path), else
+    /// `settings`.
+    static func settingsFile(in args: [String], directory: URL) -> URL {
+        let name = args.firstIndex(of: "watch").flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil } ?? "settings"
+        return name.contains("/") ? URL(fileURLWithPath: name) : directory.appendingPathComponent(name)
+    }
+
+    /// The model a settings file was saved from: the ids of its `# camera VID:PID SERIAL` line as "vid:pid", four hex
+    /// digits each as in `brioctl list`. nil if the file is not there or has no such line.
+    static func fileCamera(at url: URL) -> String? {
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+        for line in text.split(separator: "\n") where line.hasPrefix("# camera ") {
+            let ids = line.dropFirst("# camera ".count).split(separator: " ").first?.split(separator: ":") ?? []
+            if ids.count == 2, let vid = Int(ids[0], radix: 16), let pid = Int(ids[1], radix: 16) {
+                return String(format: "%04x:%04x", vid, pid)
+            }
+        }
+        return nil
     }
 
     /// `--camera ID` or `--camera=ID` in the arguments of an agent.

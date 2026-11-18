@@ -2,22 +2,24 @@
 # Offline tests for brioctl: the same source built with -DBRIOCTL_FAKE, so it talks to a camera that is read from a
 # snapshot file (tests/mxbrio-1.1.394.snap, taken from a real MX Brio with `brioctl snapshot`) instead of USB.
 # Every test gets its own copy of the snapshot (camera.snap) and of the other fixtures (generic.snap, extra.snap,
-# brio500.snap: see make-fixtures.py) and its own HOME. `import optionsplus` reads optionsplus.db, a copy of
-# tests/optionsplus-sample.db (the settings database of Logi Options+ 2.9.994631 with a made-up serial number and ids;
-# optionsplus-sample.json is the document in it). Run it with `make test`.
+# brio500.snap: see make-fixtures.py; streamcam.snap: taken from a real StreamCam) and its own HOME.
+# `import optionsplus` reads optionsplus.db, a copy of tests/optionsplus-sample.db (the settings database of Logi
+# Options+ 2.9.994631 with a made-up serial number and ids; optionsplus-sample.json is the document in it). Run it
+# with `make test`.
 set -u
 
 HERE=$(cd "$(dirname "$0")" && pwd) || exit 1
 BIN=${BIN:-$HERE/brioctl-fake}
 FIXTURE=$HERE/mxbrio-1.1.394.snap
 GENERIC=$HERE/generic-uvc.snap EXTRA=$HERE/generic-uvc-extra.snap BRIO500=$HERE/brio500-sim.snap
+STREAMCAM=$HERE/streamcam.snap
 OPLUS=$HERE/optionsplus-sample.db OPLUS_JSON=$HERE/optionsplus-sample.json
 ROOT=$(mktemp -d "${TMPDIR:-/tmp}/brioctl-test.XXXXXX") || exit 1
 trap 'rm -rf "$ROOT"' EXIT
 trap 'exit 1' HUP INT TERM
 
 [ -x "$BIN" ] || { echo "Bail out! $BIN is not built (make test builds it)"; exit 1; }
-for f in "$FIXTURE" "$GENERIC" "$EXTRA" "$BRIO500" "$OPLUS" "$OPLUS_JSON"; do
+for f in "$FIXTURE" "$GENERIC" "$EXTRA" "$BRIO500" "$STREAMCAM" "$OPLUS" "$OPLUS_JSON"; do
     [ -f "$f" ] || { echo "Bail out! missing $f (make fixtures)"; exit 1; }
 done
 
@@ -734,11 +736,105 @@ please report with 'brioctl snapshot'" || return 1
     expect "factory-reset status" "$rc" 1 || return 1
     # hdr, as for the MX Brio
     expect "hdr" "$("$BIN" hdr off)" "hdr off" || return 1
-    # a snapshot has no Logitech-only registers and no microphone
+    # a snapshot is for a report: it has the other registers of the extension units too, and no microphone
     "$BIN" snapshot > out.snap || return 1
     has "device line" "$(cat out.snap)" "device 046d 0943" || return 1
-    noline "no Peripheral registers" "$(grep '^reg' out.snap | sed 's/^reg //')" "$PERIPHERAL" || return 1
+    has "a Peripheral register" "$(cat out.snap)" "reg $PERIPHERAL 16 " || return 1
     noline "no micgain" "$(cat out.snap)" micgain
+}
+
+# The StreamCam (unit ids as in the MX Brio's descriptor): hdr, eis, stereo and the orientation sensor.
+t_streamcam() {
+    export BRIOCTL_FAKE=$PWD/streamcam.snap
+    "$BIN" snapshot > out.snap || return 1
+    grep -v '^#' streamcam.snap | sort > want
+    grep -v '^#' out.snap | sort > got
+    cmp -s want got || { echo "# snapshot of the StreamCam differs"; diff want got | head -5; return 1; }
+    out=$("$BIN" 2>&1) || return 1
+    has "name" "$out" "StreamCam  046d:0893" || return 1
+    hasnt "tested" "$out" "experimental support" || return 1
+    hasnt "its own controls" "$out" "standard UVC controls only" || return 1
+    matches "listed as full" "$("$BIN" list)" '046d:0893 +Logitech StreamCam +StreamCam +full ' || return 1
+    for name in hdr eis stereo orientation zoom brightness; do
+        matches "$name line" "$out" "^  $name +[^ ]+ +default " || return 1
+    done
+    for name in fov showmode warmth tint vibrance expcomp mic smooth micgain backlight roll; do
+        noline "$name is not there" "$out" "$name" || return 1
+    done
+    hasnt "no status" "$out" "Status (read-only)" || return 1
+    BRIOCTL_FAKE_TRACE=1 "$BIN" eis on > /dev/null 2> trace || return 1
+    expect "eis is Videopipe 7" "$(grep '^fake SET_CUR' trace)" "fake SET_CUR unit $VIDEOPIPE sel 7 01" || return 1
+    # stereo is one byte of a block of 18: the others are written back as they were
+    BRIOCTL_FAKE_TRACE=1 "$BIN" stereo on > /dev/null 2> trace || return 1
+    expect "stereo is byte 1 of Peripheral 15" "$(grep '^fake SET_CUR' trace)" \
+        "fake SET_CUR unit $PERIPHERAL sel 15 00010000040001000a00f7fff7fff0fff0ff" || return 1
+    expect "read back" "$("$BIN" get stereo)" on || return 1
+    # GET_DEF of that block repeats the current value: no default is shown, and defaults leaves it alone
+    matches "stereo has no default" "$("$BIN")" '^  stereo +on +default \? ' || return 1
+    out=$("$BIN" defaults --dry-run) || return 1
+    noline "defaults leaves stereo" "$out" stereo || return 1
+    has "defaults resets eis" "$out" "eis on -> off" || return 1
+    # the roll control is a sensor here: read under both names, never written
+    expect "orientation" "$("$BIN" get orientation)" 0 || return 1
+    expect "roll is the same register" "$("$BIN" get roll)" 0 || return 1
+    out=$(BRIOCTL_FAKE_TRACE=1 "$BIN" orientation 90 2>&1); rc=$?
+    expect "orientation status" "$rc" 1 || return 1
+    has "orientation message" "$out" "does not allow writing" || return 1
+    hasnt "orientation write" "$out" "fake SET_CUR" || return 1
+    # the camera has Videopipe 13 and Peripheral 16 too, with other meanings: the MX Brio's controls stay away
+    for name in fov showmode warmth mic smooth; do
+        out=$(BRIOCTL_FAKE_TRACE=1 "$BIN" $name 1 2>&1); rc=$?
+        expect "$name status" "$rc" 1 || return 1
+        has "$name message" "$out" "control not found on this camera" || return 1
+        hasnt "$name write" "$out" "fake SET_CUR" || return 1
+    done
+    "$BIN" factory-reset --yes > /dev/null 2>&1; rc=$?
+    expect "factory-reset status" "$rc" 1 || return 1
+    # auto has no expcomp and no warmth here: it says so instead of saying nothing
+    out=$("$BIN" auto --dry-run 2>&1) || return 1
+    has "auto, exposure" "$out" "this camera has no expcomp" || return 1
+    has "auto, white balance" "$out" "this camera has no warmth" || return 1
+    # service registers are in the snapshot by size only
+    matches "a service register" "$(cat streamcam.snap)" "^reg $PERIPHERAL 17 info 03 len 0001\$"
+}
+
+# Two cameras brioctl knows: the settings file says which one a command without --camera and watch mean.
+t_two_known_cameras() {
+    BRIOCTL_FAKE=$PWD/camera.snap:$PWD/streamcam.snap
+    out=$("$BIN" get zoom 2>&1); rc=$?
+    expect "no saved settings: ask" "$rc" 2 || return 1
+    has "ask message" "$out" "several cameras: choose one with --camera" || return 1
+    has "two full, watch waits" "$("$BIN" --test-watch-target 2>&1)" "several cameras with full support" || return 1
+    "$BIN" --camera 1 save > /dev/null || return 1
+    expect "the camera of the saved settings" "$(which_camera)" "device 046d 0944" || return 1
+    expect "watch follows it" "$("$BIN" --test-watch-target)" \
+        "046d:0944 serial=000000000000 uid=0x100000046d0944" || return 1
+    # the other camera's settings never go over that file
+    out=$("$BIN" --camera 2 save 2>&1); rc=$?
+    expect "save over another camera's file status" "$rc" 1 || return 1
+    has "save message" "$out" "holds the settings of another camera (046d:0944)" || return 1
+    has "the file is as it was" "$(cat home/.config/brioctl/settings)" "# camera 046d:0944" || return 1
+    out=$("$BIN" --camera 2 eis on --save 2>&1); rc=$?
+    expect "--save status" "$rc" 1 || return 1
+    # under its own name they do, and watch with that file follows that camera
+    "$BIN" --camera 2 save streamcam > /dev/null || return 1
+    expect "watch FILE" "$("$BIN" --test-watch-target streamcam)" \
+        "046d:0893 serial=00000000 uid=0x200000046d0893" || return 1
+    # the camera of the file is unplugged: watch waits for it and does not take the other one
+    BRIOCTL_FAKE=$PWD/streamcam.snap
+    out=$("$BIN" --test-watch-target 2>&1) || return 1
+    has "waits for its camera" "$out" "the camera of these settings is not connected, waiting for it" || return 1
+    has "no target" "$out" "no target" || return 1
+    # two of the model: the serial number of the file tells, and without a match nothing is taken
+    sed 's/^serial .*/serial BRIOSERIAL2/' camera.snap > brio2.snap
+    BRIOCTL_FAKE=$PWD/brio2.snap:$PWD/camera.snap
+    expect "by serial" "$("$BIN" --test-watch-target)" "046d:0944 serial=000000000000 uid=0x200000046d0944" || return 1
+    expect "a command too" "$("$BIN" snapshot | grep '^serial')" "serial 000000000000" || return 1
+    sed 's/^serial .*/serial BRIOSERIAL3/' camera.snap > brio3.snap
+    BRIOCTL_FAKE=$PWD/brio2.snap:$PWD/brio3.snap
+    has "no serial matches" "$("$BIN" --test-watch-target 2>&1)" "none has its serial number" || return 1
+    "$BIN" get zoom > /dev/null 2>&1; rc=$?
+    expect "a command asks" "$rc" 2
 }
 
 t_logitech_models() {
@@ -2601,7 +2697,8 @@ run() {  # run NAME FUNCTION
     N=$((N + 1))
     dir=$ROOT/$N
     if ! { mkdir -p "$dir/home" && cp "$FIXTURE" "$dir/camera.snap" && cp "$GENERIC" "$dir/generic.snap" &&
-        cp "$EXTRA" "$dir/extra.snap" && cp "$BRIO500" "$dir/brio500.snap" && cp "$OPLUS" "$dir/optionsplus.db"; }; then
+        cp "$EXTRA" "$dir/extra.snap" && cp "$BRIO500" "$dir/brio500.snap" && cp "$STREAMCAM" "$dir/streamcam.snap" &&
+        cp "$OPLUS" "$dir/optionsplus.db"; }; then
         echo "not ok $N - $1 (cannot set up)"
         FAILED=$((FAILED + 1))
         return
@@ -2667,6 +2764,8 @@ run "a generic camera: standard controls only, backlight, no Logitech writes" t_
 run "hdr and backlight are one control with two names" t_hdr_or_backlight
 run "an experimental model gets the field of view, Show Mode and hdr only" t_experimental_camera
 run "models: fov, Show Mode, hdr or backlight as the table says; unknown ones get none" t_logitech_models
+run "the StreamCam: hdr, eis, stereo in a block, the orientation sensor, nothing of the MX Brio" t_streamcam
+run "two known cameras: the settings file names the default camera and the one watch follows" t_two_known_cameras
 run "extension unit writes need the SET bit" t_xu_needs_the_set_bit
 run "dump does not read the registers of an unknown extension unit" t_dump_unknown_extension_unit
 run "hue, gamma, iris, roll, privacy, signed ranges, exposure modes of another camera" t_standard_controls

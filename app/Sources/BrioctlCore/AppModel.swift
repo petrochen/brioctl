@@ -33,7 +33,8 @@ public final class AppModel: ObservableObject {
                             defaults: environment.defaults)
         agents = LaunchAgentManager(directory: environment.agentsDirectory,
                                     launchctl: launchctl ?? Self.defaultLaunchctl(for: environment), cliPath: cli.path,
-                                    appPath: environment.appBundlePath, logPath: environment.logPath)
+                                    appPath: environment.appBundlePath, logPath: environment.logPath,
+                                    settingsDirectory: environment.settingsDirectory)
         hotkeysEnabled = environment.defaults.bool(forKey: "hotkeysEnabled")
         store.confirm = { title, text, button in
             NSApp.activate(ignoringOtherApps: true)

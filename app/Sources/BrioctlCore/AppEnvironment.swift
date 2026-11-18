@@ -20,6 +20,8 @@ public struct AppEnvironment {
     public var cliURL: URL?
     public var agentsDirectory: URL
     public var logPath: String
+    /// The directory of the settings files, ~/.config/brioctl: where the CLI keeps them.
+    public var settingsDirectory: URL
     public var appBundlePath: String
     public var defaults: UserDefaults
     public var processEnvironment: [String: String]
@@ -45,6 +47,7 @@ public struct AppEnvironment {
             usesAgentsOverride = false
         }
         logPath = home.appendingPathComponent("Library/Logs/brioctl.log").path
+        settingsDirectory = home.appendingPathComponent(".config/brioctl", isDirectory: true)
         appBundlePath = bundle.bundleURL.path
         if let suite = env[Self.suiteKey], !suite.isEmpty, let d = UserDefaults(suiteName: suite) {
             defaults = d
