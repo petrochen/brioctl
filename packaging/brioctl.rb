@@ -4,7 +4,7 @@ class Brioctl < Formula
   desc "Command-line control for Logitech MX Brio, StreamCam and other UVC webcams"
   homepage "https://github.com/petrochen/brioctl"
   url "https://github.com/petrochen/brioctl/archive/refs/tags/v1.3.1.tar.gz"
-  sha256 "1af400def0c1f8d0acef6f0fc95925017697bf41bbfec7b2c136ce43101f7ddf"
+  sha256 "2c874c76bbee6a36408604e86fded8b9d8f833bdf95b2a9e0892bbb9776e9776"
   license "MIT"
 
   depends_on :macos
