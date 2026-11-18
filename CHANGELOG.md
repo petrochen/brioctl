@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Logitech StreamCam (`046d:0893`), tested on hardware: `hdr`, `eis` (image stabilisation), `stereo` (stereo
+  microphone) and `orientation` (how the camera is turned; a sensor, read-only).
+- `brioctl snapshot` records every register of the camera's extension units, service registers by size only. One file
+  is a camera report and a test fixture; `CONTRIBUTING.md` says how to add a camera with it.
+- With several cameras brioctl knows, a command without `--camera` uses the camera the saved settings are from.
+
+### Changed
+
+- `watch` without `--camera` follows only the camera its settings file was saved from (the `# camera` line) and waits
+  for it. A file without that line is followed as before.
+- `save` refuses to write the settings of one model over a file saved from another.
+- `auto` stops with `out_of_reach`, not `in_range`, when the picture is off and nothing can be changed (the camera has
+  no such control, or it is at its safety limit); the notes say what.
+- The app saves for the `watch` agent only the camera its settings file names.
+- A model is a list of its own controls (`MODELS` in `brioctl.c`) instead of feature flags; firmware, debug, restart
+  and reset registers are never offered, whatever a list says.
+
 ## 1.2.0 — 2026-11-03
 
 ### Added

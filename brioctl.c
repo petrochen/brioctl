@@ -979,11 +979,14 @@ static const struct { int unit, sel, bit; } STD_BITS[] = {
 
 // Does the camera have this control? Only one from its own list: a standard one if its camera terminal or processing
 // unit declares it, one of its model's if the camera has the unit. Nothing else is ever written to an extension unit.
+static int knownXU(const char *guid);
+static int serviceReg(const char *guid, int sel);
 static int avail(const Cam *c, const Ctrl *k) {
     int listed = 0;
     for (int i = 0; i < c->ctrls.n; i++) listed |= c->ctrls.k[i] == k;
     if (!k->name || !listed || !c->unit[k->unit]) return 0;
-    if (isXU(k)) return 1;
+    // whatever a model lists: never a firmware, debug, restart or reset register of the units brioctl knows
+    if (isXU(k)) return !(knownXU(UNIT_GUID[k->unit]) && serviceReg(UNIT_GUID[k->unit], k->sel));
     for (size_t i = 0; i < sizeof STD_BITS / sizeof *STD_BITS; i++)
         if (STD_BITS[i].unit == k->unit && STD_BITS[i].sel == k->sel)
             return c->bm[k->unit == U_PU] >> STD_BITS[i].bit & 1;
@@ -3277,7 +3280,8 @@ static int autoCmd(Cam *c, int argc, char **argv, int doSave) {
             for (int j = 0; j < nrecs; j++) dup |= !strcmp(recs[j], plan.rec[i]);
             if (!dup && nrecs < 16) snprintf(recs[nrecs++], sizeof recs[0], "%s", plan.rec[i]);
         }
-        if (!plan.n) { stopped = "in_range"; break; }
+        // nothing to change: all is well, or what is off has no control here or is at its safety limit (the notes say)
+        if (!plan.n) { stopped = autoScore(&now) > 0.01 ? "out_of_reach" : "in_range"; break; }
         if (step > 1 && !framingOnly && autoScore(&now) >= prevScore - 0.01) { stopped = "no_improvement"; break; }
         if (step > AUTO_MAX_STEPS) { stopped = "max_steps"; break; }
         int back = 0;  // would a control go back to a value it already had in this run?

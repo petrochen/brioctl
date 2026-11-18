@@ -26,7 +26,8 @@ brioctl undo                             # put back what the last command replac
 
 - A menu bar app with global hotkeys for field of view and zoom.
 - `watch` re-applies your settings when the camera connects and when video starts.
-- Any UVC camera: the Logitech MX Brio in full, other Brio models and generic webcams with the standard controls.
+- Any UVC camera: the Logitech MX Brio and StreamCam in full, other Brio models experimentally, every other webcam
+  with its standard controls. [Adding a camera](CONTRIBUTING.md#add-a-camera) takes a snapshot and a few lines.
 
 <img src="docs/media/app.png" alt="The brioctl menu bar window with the Logitech settings of an MX Brio" width="389">
 
@@ -58,7 +59,7 @@ them with ranges, settle times and risks.
 | `brioctl auto [--dry-run] [--save]`       | Measure, nudge `expcomp`, `hdr`, `warmth`, measure again (see below)                                  |
 | `brioctl install-skill [--uninstall]`     | Copy the agent skill into every `~/.claude/skills` and `~/.codex/skills` that exists                  |
 | `brioctl watch [FILE]`                    | Apply a settings file now, on connect and on video start                                              |
-| `brioctl dump`, `brioctl snapshot [FILE]` | Read-only: every unit and register; a bug report with the serial masked                               |
+| `brioctl dump`, `brioctl snapshot [FILE]` | Read-only: every unit and register; the camera as a file for a report or a test, serial masked        |
 
 A settings file is plain text, one `name value` per line; `save` starts it with `# camera VID:PID SERIAL`, so remove
 that line before you post it. Text and JSON output contain the camera's serial number too. When several settings are
@@ -72,7 +73,9 @@ given in one command, `mic` is written last because the camera restarts after it
 
 `auto` is a handful of rules, not a model. It measures the face (the whole frame if there is none) on the average of
 two frames, waits 2 s after each change (3.5 s after framing), takes up to 4 steps and stops with `in_range`,
-`no_improvement`, `oscillating` (a control would go back to a value it had in this run), `max_steps` or `dry_run`.
+`out_of_reach` (something is off and the camera has no control for it, or the control is at its safety limit: the
+notes say what), `no_improvement`, `oscillating` (a control would go back to a value it had in this run), `max_steps`
+or `dry_run`.
 Every change goes through the normal path, so `--dry-run`, `--save` and one `undo` for the whole run work.
 
 | Rule          | When                                            | What                                            |
@@ -104,8 +107,11 @@ brioctl`, or "Re-apply settings automatically" in the app) runs `brioctl watch` 
 start, when the camera connects, and 2 s after video starts (HID report on the MX Brio, CoreMediaIO for any camera).
 Settings you change by hand and do not save are reverted at the next video start: add `--save`.
 
-- It follows one camera: the MX Brio, else the only experimental one, else the serial you give with `--camera`. It
-  never applies MX Brio settings to another webcam and waits quietly when none is connected.
+- It follows one camera: the one its settings file was saved from (the `# camera` line), and waits quietly while
+  that camera is not connected. A file without that line: the only camera with full support, else the only
+  experimental one. `--camera ID` names another.
+- A second camera gets its own file and its own agent: `brioctl --camera 2 save desk`, then `brioctl watch desk`.
+  `save` refuses to write the settings of one model over a file saved from another.
 - It never changes `mic` while video is on, skips `fov`, `zoom`, `pan` and `tilt` while Show Mode shows the desk, never
   applies `privacy`, and refuses a file saved from another model. The log is `~/Library/Logs/brioctl.log`.
 
@@ -124,21 +130,17 @@ A copy downloaded by a browser needs "Open Anyway" in System Settings, or `xattr
 
 `brioctl list` shows every USB device with a UVC VideoControl interface and its support level:
 
-| Camera                          | USB id (`VID:PID`)   | Support        | What brioctl does                                                                                                 |
-| ------------------------------- | -------------------- | -------------- | ----------------------------------------------------------------------------------------------------------------- |
-| Logitech MX Brio                | `046d:0944`          | `full`         | Standard controls, field of view, Show Mode, `hdr`, warmth, tint, vibrance, `expcomp`, `mic`, `smooth`, `micgain` |
-| Logitech Brio                   | `046d:085e`          | `experimental` | Standard controls, field of view, `hdr`                                                                           |
-| Logitech Brio 500               | `046d:0943`          | `experimental` | Standard controls, field of view, Show Mode, `hdr`                                                                |
-| Logitech Brio 501 / 505         | `046d:0946` / `0919` | `experimental` | Standard controls, field of view (backlight is `backlight`)                                                       |
-| Logitech Brio 4K Stream Edition | `046d:086b`          | `experimental` | Standard controls, field of view, `hdr`                                                                           |
-| Every other UVC camera          | any                  | `standard`     | The standard controls the camera declares; no extension unit is written                                           |
+- `full`: the Logitech MX Brio (firmware 1.1.394) and StreamCam, tested on hardware, with their own controls on top of
+  the standard ones.
+- `experimental`: five other Brio models, with the field of view, Show Mode and `hdr` that
+  [cameractrls](https://github.com/soyersoyer/cameractrls) and an
+  [OpenLogi issue](https://github.com/AprilNEA/OpenLogi/issues/1222) report. Not tested: send
+  `brioctl snapshot report.snap` if you own one.
+- `standard`: every other UVC camera, with the standard controls it declares. No extension unit is written.
 
-Only the MX Brio (firmware 1.1.394) is tested on hardware; the experimental rows follow
-[cameractrls](https://github.com/soyersoyer/cameractrls) and an
-[OpenLogi issue](https://github.com/AprilNEA/OpenLogi/issues/1222). Send `brioctl snapshot report.snap` if you own one
-([COMPATIBILITY.md](COMPATIBILITY.md), [docs/registers.md](docs/registers.md)).
-Without `--camera`, brioctl uses the only camera, or the only one it knows; if it cannot choose it prints the list and
-exits with status 2.
+The table per model is [COMPATIBILITY.md](COMPATIBILITY.md), the registers are in
+[docs/registers.md](docs/registers.md). Without `--camera`, brioctl uses the only camera, or the only one it knows, or
+the one the saved settings are from; if it cannot choose it prints the list and exits with status 2.
 
 ## Install and safety
 

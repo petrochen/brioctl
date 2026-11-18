@@ -44,8 +44,10 @@ body:
   - type: textarea
     id: dump
     attributes:
-      label: Output of `brioctl dump`
-      description: Add `--camera ID` if more than one camera is connected. `dump` only reads the camera.
+      label: Output of `brioctl snapshot`
+      description: >-
+        Add `--camera ID` if more than one camera is connected. `snapshot` only reads the camera and masks its serial
+        number. It is the file brioctl's tests load, so it is enough to add your camera.
       render: text
     validations:
       required: true
