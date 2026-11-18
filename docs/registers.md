@@ -368,19 +368,27 @@ write if the size is not what it expects. `dump` asks service registers only for
 
 ## Experimental models
 
-`brioctl` knows seven Logitech models by their USB product id (vendor `046d`). The MX Brio is `full`: the register
-notes above are about it. So is the [StreamCam](#streamcam). The other five are `experimental`: brioctl writes only the extension controls that other projects
-report for them, and the standard controls the camera declares. Nothing here was tested with brioctl (evidence:
-reported), and nothing in the table is known for these cameras beyond the sources below.
+`brioctl` knows fifteen Logitech models by their USB product id (vendor `046d`). The MX Brio is `full`: the register
+notes above are about it. So is the [StreamCam](#streamcam). The other thirteen are `experimental`: brioctl writes only
+the extension controls the sources below name for them, and the standard controls the camera declares. Nothing here
+was tested with brioctl (evidence: reported), and nothing in the table is known for these cameras beyond the sources.
 
-| Model                  | Product id | `fov` (Videopipe 5) | `showmode` (Videopipe 13) | Backlight compensation is named | Source                      |
-| ---------------------- | ---------- | ------------------- | ------------------------- | ------------------------------- | --------------------------- |
-| MX Brio                | `0944`     | yes                 | yes                       | `hdr`                           | measured (this document)    |
-| Brio 500               | `0943`     | yes                 | yes                       | `hdr`                           | cameractrls, OpenLogi #1222 |
-| Brio                   | `085e`     | yes                 | no                        | `hdr`                           | cameractrls                 |
-| Brio 501               | `0946`     | yes                 | no                        | `backlight`                     | cameractrls                 |
-| Brio 505               | `0919`     | yes                 | no                        | `backlight`                     | cameractrls                 |
-| Brio 4K Stream Edition | `086b`     | yes                 | no                        | `hdr`                           | cameractrls                 |
+| Model                      | Product id | `fov` (Videopipe 5) | `showmode` (Videopipe 13) | Other                  | Source                                 |
+| -------------------------- | ---------- | ------------------- | ------------------------- | ---------------------- | -------------------------------------- |
+| MX Brio                    | `0944`     | yes                 | yes                       | see above              | measured (this document)               |
+| Brio 500                   | `0943`     | yes                 | yes                       | `hdr`                  | cameractrls, OpenLogi #1222, Logi Tune |
+| Brio 501                   | `0946`     | yes                 | yes                       | `hdr`                  | cameractrls, Logi Tune                 |
+| Brio 505                   | `0919`     | yes                 | yes                       | `hdr`                  | cameractrls, Logi Tune                 |
+| Brio                       | `085e`     | yes                 | no                        | `hdr`                  | cameractrls, Logi Tune                 |
+| Brio 4K Stream Edition     | `086b`     | yes                 | no                        | `hdr`                  | cameractrls, Logi Tune                 |
+| 4K Pro Magnetic            | `087f`     | yes                 | no                        | `hdr`                  | Logi Tune                              |
+| MX Brio 705 for Business   | `091d`     | yes                 | yes                       | `hdr`                  | Logi Tune                              |
+| MX Brio (another id)       | `0947`     | yes                 | yes                       | `hdr`                  | Logi Tune                              |
+| Brio 920                   | `0964`     | yes                 | no                        | `hdr`                  | Logi Tune                              |
+| Brio 920 for Business      | `0998`     | yes                 | no                        | `hdr`                  | Logi Tune                              |
+| Brio 920 Plus              | `099a`     | yes                 | no                        | `hdr`                  | Logi Tune                              |
+| Brio 920 Plus for Business | `0999`     | yes                 | no                        | `hdr`                  | Logi Tune                              |
+| Reach                      | `0948`     | no                  | no                        | `hdr`, `eis`, `stereo` | Logi Tune                              |
 
 "yes" means brioctl offers the setting for the model; "no" means it does not, which says nothing about the camera.
 
@@ -398,20 +406,27 @@ Sources:
   `GET_DEF` 0). Writes of 3 or 255 to the field of view succeed on the wire and are discarded, so the reported range
   cannot be used. The issue also says the HDR switch of Logi Tune on that camera is not an extension control: it
   writes the backlight compensation of the processing unit.
+- **Logi Tune** 3.15 keeps a list of what it offers for each camera model. For the field of view it names the six
+  product ids cameractrls names, which is why the rest of the list is taken as a source too. It gives the Brio 501 and
+  505 the Show Mode and HDR switch of the Brio 500, and it is the only source for the last eight rows. The list says
+  what the app offers; before a write the app also checks that the camera has the register, and so does brioctl. The
+  two other MX Brio ids get what the Brio 500 gets, not the MX Brio's own controls: those were measured on `0944` only.
+  The same list has a microphone switch for the Brio, the Brio 300 family and the C920e; brioctl does not offer it
+  there, because which register it is on those cameras is not known.
 
 What brioctl does with this:
 
-- **Extension writes.** `fov` on all six models, `showmode` on the MX Brio and the Brio 500. Nothing else is written to
-  an extension unit of an experimental camera: warmth, tint, vibrance, exposure compensation, `mic`, `smooth`, the
-  status registers and `micgain` are for the MX Brio only, because their layout on the other cameras is not known.
-- **Guards.** The unit must be in the descriptor (found by GUID), `GET_LEN` must be 1 and `GET_INFO` must have the write
-  bit. The values come from brioctl's table (0, 1, 2 for the field of view, 0 and 1 for Show Mode), never from `GET_MAX`.
-  After the write the value is read back.
+- **Extension writes.** `fov` and `showmode` as in the table; `eis` and `stereo` on the Reach, at the registers measured
+  on the [StreamCam](#streamcam). Nothing else is written to an extension unit of an experimental camera: warmth, tint,
+  vibrance, exposure compensation, `mic`, `smooth`, the status registers and `micgain` are for the MX Brio only,
+  because their layout on the other cameras is not known.
+- **Guards.** The unit must be in the descriptor (found by GUID), `GET_LEN` must be the size in brioctl's table and
+  `GET_INFO` must have the write bit. The values come from brioctl's table (0, 1, 2 for the field of view, 0 and 1 for
+  the switches), never from `GET_MAX`. After the write the value is read back.
 - **HDR.** On a model with an HDR switch the standard backlight compensation control is named `hdr` (on, off). OpenLogi
-  confirms that for the Brio 500. The Brio and the Brio 4K Stream Edition follow the same naming by assumption (evidence:
-  reported at most); the Brio 501 and 505 use `backlight` (a number). It is the standard control either way, it exists
-  only if the camera declares it, and both names work on every camera.
-- **Reports.** `brioctl snapshot report.snap` writes the descriptor and every register brioctl reads, with the serial
+  confirms that for the Brio 500; for the others it is what Logi Tune's list says. It is the standard control either
+  way, it exists only if the camera declares it, and both names work on every camera.
+- **Reports.** `brioctl snapshot report.snap` writes the descriptor and every register `dump` reads, with the serial
   number masked. That is what is needed to confirm or correct a row.
 
 ## StreamCam
