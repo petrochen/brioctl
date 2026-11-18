@@ -1,9 +1,9 @@
 # Copy of Formula/brioctl.rb in petrochen/homebrew-tap. On a new release: update url and sha256
 # (curl -sL <url> | shasum -a 256) here and in the tap.
 class Brioctl < Formula
-  desc "Command-line control for the Logitech MX Brio webcam"
+  desc "Command-line control for Logitech MX Brio, StreamCam and other UVC webcams"
   homepage "https://github.com/petrochen/brioctl"
-  url "https://github.com/petrochen/brioctl/archive/refs/tags/v1.3.0.tar.gz"
+  url "https://github.com/petrochen/brioctl/archive/refs/tags/v1.3.1.tar.gz"
   sha256 "1af400def0c1f8d0acef6f0fc95925017697bf41bbfec7b2c136ce43101f7ddf"
   license "MIT"
 

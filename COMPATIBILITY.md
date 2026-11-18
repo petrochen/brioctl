@@ -28,6 +28,29 @@ offers for each model; they are marked experimental. Every other UVC camera gets
 Standard controls are the UVC controls the camera declares. FOV is the 90/78/65 switch, written on the experimental
 models only after the camera confirms the control. `hdr` is the backlight compensation. `watch` works with any camera.
 
+## Logitech cameras with the standard controls only
+
+For these models Logitech's own app offers nothing beyond the standard UVC controls (zoom, exposure, white balance,
+focus and the like, as far as the camera declares them), so brioctl has nothing to add: `brioctl list` shows them as
+`standard`. Not tested on hardware.
+
+| Models                                      | USB ids (`046d:`)                                |
+| ------------------------------------------- | ------------------------------------------------ |
+| C920 HD Pro Webcam, C920-C, C920c, C920e    | `082d` `08e5` `0892` `0841` `08b7` `08b6` `08e7` |
+| C922 Pro Stream Webcam                      | `085c` `0883` `0894`                             |
+| C925e                                       | `085b`                                           |
+| C930 Pro Webcam, C930c, C930e, C930n, C930s | `0844` `0891` `0843` `091c` `091b`               |
+| C505, C505e                                 | `08e3` `08e4`                                    |
+| C615                                        | `082c`                                           |
+| C270                                        | `0825`                                           |
+| C310                                        | `081b`                                           |
+| Brio 90, 95                                 | `0949` `094a`                                    |
+| Brio 100, 101, 105                          | `094c` `094d` `094b`                             |
+| Brio 300, 301, 305, Brio 1080p Webcam       | `0942` `0945` `0917` `094e`                      |
+
+The same app has a microphone switch for the C920c, the C920e, the Brio 300 family and the Brio (`085e`). brioctl does
+not offer it: which register it is on those cameras is not known. A snapshot from one of them would tell.
+
 ## Untested on hardware
 
 Everything except the MX Brio and the StreamCam is untested on hardware. Please report what you see with the
